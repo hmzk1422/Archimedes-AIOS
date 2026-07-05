@@ -1,0 +1,1 @@
+Definitions of liability, comprehensive, and collision.
