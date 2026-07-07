@@ -1,1 +1,0 @@
-Step-by-step instructions for what to do after an accident.
