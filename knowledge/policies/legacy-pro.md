@@ -6,8 +6,6 @@ Allianz LegacyPro is a traditional individual life insurance product designed fo
     - Note for minors: For insured individuals under age 5, the death benefit payout follows a graduated scale (20% to 100%).
 - **Sum Assured Booster Benefit**: When the insured reaches age 75, the Sum Assured increases by up to 50% of the initial Basic Sum Assured, provided the Policyholder meets specific requirements (e.g., auto-debit, e-correspondence, electronic policy book). If requirements are not met, the increase is limited to 25%.
 - **Basic Insurance Premium Waiver:** Waives future premium payments if the insured is diagnosed with one of the 77 specified critical illnesses, subject to claim approval.
-    - Insured must not experience any symptoms or indications of critical illness within 80 day period when policy started otherwise policy will be disqualified.
-    - Insured does not have medical condition and is not diagnosed with illness listed in the 77 critical illnesses
 
 ## Terms and Conditions
 - **Insurance Period:** Coverage up to age 100 (nearest birthday).
@@ -22,8 +20,10 @@ Allianz LegacyPro is a traditional individual life insurance product designed fo
 - **Cooling off period:** The policyholder may cancel the policy within 14 calendar days of receipt for a refund of premiums paid (minus applicable fees).
 - **Exclusions & Obligations**: Coverage is subject to specific policy exclusions (e.g., suicide, illegal acts, or undisclosed pre-existing medical conditions). Policyholders must provide accurate information in the application (SPAJ) and notify Allianz of claims in writing within 60 calendar days of the event.
 - **Important Note:** This product is not a bank product; the bank acts only as a referrer. It is not guaranteed by the government or the Deposit Insurance Corporation (LPS).
+- **Rejection of policy:** If you are diagnosed with one of the 77 illnesses, your appeal for the policy will be rejected or substandard. If you are prediagnosed with one of the 77 illnesses with an active policy, then the policy will be revoked.
 
 ## 77 Illnesses
+Note: If you get one of 77 these illnesses, you cannot get policy anymore. If you get it during payment period, your payment will be waived.
 1. First Heart Attack 
 2. Coronary Artery Bypass Surgery 
 3. Other Serious Coronary Artery Disease 
