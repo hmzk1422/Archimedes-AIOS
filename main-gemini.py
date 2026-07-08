@@ -4,7 +4,13 @@ import json
 import glob
 import shutil
 from dotenv import load_dotenv
+
 from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.base_models import InputFormat
+
+from llama_cloud.client import LlamaCloud
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -14,6 +20,9 @@ from langchain_chroma import Chroma
 from langchain_community.chat_message_histories import FileChatMessageHistory
 from langchain_core.tools import tool
 from langchain_core.messages import ToolMessage
+
+from modes.policies.tools import toolkit as policies_toolkit
+from modes.administration.tools import toolkit as admin_toolkit
 
 # ==========================================
 # 1. Setup AI Models
@@ -31,71 +40,27 @@ def extract_text(content):
     return str(content)
 
 # ==========================================
-# 1.5. Define Agent Tools (The Actions)
+# 2. Pre-Processing: PDF to Markdown Pipeline (LlamaParse Edition)
 # ==========================================
 
-@tool
-def get_claim_status(claim_id: str) -> str:
-    """
-    Fetches the real-time status of an insurance claim from the database. 
-    Use this ONLY when the user asks about the status of a specific claim ID.
-    """
-    mock_db = {
-        "CLM-123": {"status": "Pending", "reason": "Awaiting Police Report"},
-        "CLM-999": {"status": "Approved", "reason": "Funds dispatched to bank account"}
-    }
-    return json.dumps(mock_db.get(claim_id.upper(), {"error": "Claim ID not found."}))
-
-@tool
-def process_top_up(policy_id: str, amount: float) -> str:
-    """
-    Processes a top-up payment for a Unit-Linked policy.
-    Call this when the user explicitly confirms they want to add money to their policy.
-    """
-    return f"SUCCESS: Top-up of ${amount} initiated for Policy #{policy_id}. Processing time is 1-2 business days."
-
-@tool
-def register_claim_details(incident_date: str, has_all_docs: bool) -> str:
-    """
-    Registers the claim details once the user confirms they have all documents and provides the incident date.
-    Use this to transition from the 'gathering info' phase to the 'submission' phase for a claim.
-    """
-    claim_data = {
-        "incident_date": incident_date,
-        "has_all_docs": has_all_docs,
-        "status": "Ready for Portal Submission"
-    }
-    # Save to a file to prove it actually executed a back-end action
-    os.makedirs("memory", exist_ok=True)
-    with open("memory/pending_claims.json", "a") as f:
-        f.write(json.dumps(claim_data) + "\n")
-        
-    return "SUCCESS: Claim details registered in the database. The user can now proceed to the Allianz portal."
-
-# Group all tools into a list (Added register_claim_details here!)
-toolkit = [get_claim_status, process_top_up, register_claim_details]
-
-# Bind the tools to your LLM!
-llm_with_tools = llm.bind_tools(toolkit)
-
-# ==========================================
-# 2. Pre-Processing: PDF to Markdown Pipeline
-# ==========================================
-
-def preprocess(PDF_DIR, POLICY_DIR):
-    PERSIST_DIR = "./chroma_db"
+def preprocess(PDF_DIR, POLICY_DIR, PERSIST_DIR):
     os.makedirs(PDF_DIR, exist_ok=True)
     os.makedirs(POLICY_DIR, exist_ok=True)
 
     print(f"\n--- Checking for PDF Updates in {PDF_DIR} ---")
     pdf_files = glob.glob(os.path.join(PDF_DIR, "*.pdf"))
 
-    stop_pdf_download = True
+    stop_pdf_download = False 
 
     if not pdf_files or stop_pdf_download:
         print(f"WARNING: No PDFs found in {PDF_DIR}. Please add your policy PDFs there.")
     else:
-        converter = DocumentConverter()
+        # ==========================================
+        # 🟢 MODERN CODE: Initialize LlamaCloud
+        # ==========================================
+        print("Initializing modern LlamaCloud Platform Engine...")
+        client = LlamaCloud()
+
         for pdf_path in pdf_files:
             base_name = os.path.basename(pdf_path).replace('.pdf', '')
             md_output_path = os.path.join(POLICY_DIR, f"{base_name}.md")
@@ -106,12 +71,25 @@ def preprocess(PDF_DIR, POLICY_DIR):
                     needs_conversion = False
                     
             if needs_conversion:
-                print(f"Converting new or updated PDF: {base_name}.pdf ...")
-                result = converter.convert(pdf_path)
-                md_content = result.document.export_to_markdown()
+                print(f"Uploading and scanning PDF via LlamaCloud: {base_name}.pdf ...")
+                
+                # 1. Upload the file to the platform cloud storage
+                file_obj = client.files.create(file=pdf_path, purpose="parse")
+                
+                # 2. Trigger the sync parsing using the multimodal vision 'agentic' tier
+                result = client.parsing.parse(
+                    file_id=file_obj.id,
+                    tier="agentic",       # 🌟 Triggers Multimodal Vision / Graphic Scanning
+                    version="latest",
+                    expand=["markdown"]   # Forces API to pack markdown payload into the response
+                )
+                
+                # 3. Compile the structural markdown pages back together
+                md_content = "\n\n".join([page.markdown for page in result.markdown.pages])
                 
                 with open(md_output_path, "w", encoding="utf-8") as f:
                     f.write(md_content)
+                print(f"Successfully saved parsed Vision Markdown to {md_output_path}")
             else:
                 print(f"Skipping {base_name}.pdf (Markdown is already up-to-date).")
 
@@ -119,9 +97,9 @@ def preprocess(PDF_DIR, POLICY_DIR):
     # 3. Vector Database Initialization
     # ==========================================
     print("\n--- Initializing Vector Database ---")
-
+    
     if os.path.exists(PERSIST_DIR):
-        print("Clearing old Vector Database to ensure accurate data...")
+        print(f"Clearing old Vector Database at {PERSIST_DIR}...")
         shutil.rmtree(PERSIST_DIR)
 
     print(f"Building fresh Vector Database from Markdown files in {POLICY_DIR}...")
@@ -196,8 +174,31 @@ def extract_and_update_facts(user_input, current_profile):
 session_history = FileChatMessageHistory(HISTORY_FILE)
 
 # ==========================================
-# 5. Guardrailed System Prompt
+# 5. Guardrailed System Prompt & Information Routing
 # ==========================================
+
+def get_routing_decision(user_input):
+    """Uses the LLM to categorize the user's intent to route to the correct database."""
+    router_prompt = f"""You are an intelligent routing assistant for an insurance bot.
+    Analyze the user's input and categorize it into exactly one of these two streams:
+    - "policies": Questions about products, coverage, benefits, quotes, or general rules.
+    - "administration": Questions about filing claims, updating personal details, billing, or account management.
+
+    User Input: "{user_input}"
+    
+    Respond with ONLY the exact word "policies" or "administration". No other text, no markdown."""
+    
+    try:
+        response = llm.invoke([HumanMessage(content=router_prompt)])
+        decision = extract_text(response.content).strip().lower()
+        
+        # Fallback handling just in case the LLM gets chatty
+        if "admin" in decision or "claim" in decision:
+            return "administration"
+        return "policies" 
+    except Exception:
+        return "policies" # Default safe fallback
+
 def get_dynamic_system_prompt():
     profile = load_user_profile()
     profile_text = json.dumps(profile, indent=2) if profile else "No user data collected yet."
@@ -226,11 +227,12 @@ CRITICAL COMPLIANCE RULES:
 session_state = {
     "pending_tool_call": None,  # Stores the tool data when waiting for confirmation
 }
-
-def ask_agent(user_input):
+def ask_agent(user_input, retrievers):
     global session_state
     
-    # 1. GATE CHECK: If there is an action waiting for confirmation, intercept the input!
+    # ==========================================
+    # 1. GATE CHECK (Pending Tool Confirmation)
+    # ==========================================
     if session_state["pending_tool_call"] is not None:
         if user_input.lower() in ["yes", "y", "confirm", "proceed", "sure"]:
             # User gave explicit permission! Run the saved tool.
@@ -241,7 +243,7 @@ def ask_agent(user_input):
             print(f"\n[🔒 USER CONFIRMED: Executing {tool_name} with arguments {tool_args}...]")
             
             # Map and execute the function
-            tool_map = {tool.name: tool for tool in toolkit}
+            tool_map = {tool.name: tool for tool in toolkits}
             tool_output = tool_map[tool_name].invoke(tool_args)
             
             # Print explicit terminal feedback so you know it worked
@@ -262,8 +264,16 @@ def ask_agent(user_input):
             session_state["pending_tool_call"] = None
             return "Action cancelled. I won't perform any changes to your policy.", "User Aborted Action"
 
+    # ==========================================
     # 2. STANDARD CHAT / INTENT DETECTION FLOW
-    relevant_chunks = retriever.invoke(user_input)
+    # ==========================================
+    
+    # 🌟 NEW: Route the query dynamically!
+    chosen_stream = get_routing_decision(user_input)
+    print(f"\n[AI Router selected knowledge base: {chosen_stream.upper()}]")
+    
+    active_retriever = retrievers[chosen_stream]
+    relevant_chunks = active_retriever.invoke(user_input)
     context_for_ai = "\n\n".join([doc.page_content for doc in relevant_chunks])
     
     # UPDATED: Instruct the AI to STOP talking and call the tool when data is ready
@@ -283,7 +293,9 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
     # Ask the model what it wants to do
     response_obj = llm_with_tools.invoke(messages)
     
+    # ==========================================
     # 3. INTERCEPT THE TRIGGER-HAPPY AI
+    # ==========================================
     if response_obj.tool_calls:
         # The AI *wants* to run a tool. We catch it here and freeze it!
         first_tool_call = response_obj.tool_calls[0]
@@ -347,18 +359,40 @@ RELEVANCE: <score>
 # 8. Chat Loop
 # ==========================================
 
-pdf_dir = "knowledge/pdf_source/"
+print("\n--- Initializing Knowledge Bases ---")
+# Pre-load BOTH databases so the bot can pivot seamlessly
+retrievers = {
+    "policies": preprocess(
+        "modes/pdf_source/policies/", 
+        "modes/policies/", 
+        "./chroma_db_policies"
+    ),
+    "administration": preprocess(
+        "modes/pdf_source/administration/", 
+        "modes/administration/", 
+        "./chroma_db_admin"
+    )
+}
+
+# 🌟 NEW: Create a dictionary of toolkits
+toolkits = {
+    "policies": policies_toolkit,
+    "administration": admin_toolkit
+}
+
+# 🌟 NEW: Bind the tools specifically to different instances of the LLM
+llm_with_tools = {
+    "policies": llm.bind_tools(policies_toolkit) if policies_toolkit else llm,
+    "administration": llm.bind_tools(admin_toolkit) if admin_toolkit else llm
+}
+
+# Unify memory so context isn't lost if they switch between policies and administration
+PROFILE_FILE = "memory/unified_user_profile.json"
+HISTORY_FILE = "memory/unified_chat_history.json"
+session_history = FileChatMessageHistory(HISTORY_FILE)
 
 print("\n--- Upgraded Context & Memory Engine Initialized ---")
-print("Hello! Welcome to Allianz Customer Service. How can we help you?")
-print("Click 1: Find out about Policy")
-print("Click 2: Policy Administration\n")
-user_input = int(input("\nYou: "))
-
-knowledge = ["policies", "administration"]
-
-retriever = preprocess(pdf_dir, f"knowledge/{knowledge[user_input-1]}")
-
+print("Hello! Welcome to Allianz Customer Service. How can we help you today?")
 
 while True:
     try:
@@ -370,7 +404,9 @@ while True:
             continue
             
         print("\n[Thinking... Extracting Facts & Searching Policies...]")
-        response, used_context = ask_agent(user_input)
+        # Pass the retrievers dictionary into the agent
+        response, used_context = ask_agent(user_input, retrievers)
+        
         print(f"\nAgent:\n{response}")
         
         print("\n[Running Real-Time Telemetry...]")
@@ -378,10 +414,8 @@ while True:
         
         print("-" * 40)
         print(f"TELEMETRY METRICS:")
-        print(f"► Faithfulness (Anti-Hallucination): {faith_score}/10")
-        print(f"► Answer Relevance (Quality):        {rel_score}/10")
-        if faith_score != "N/A" and int(faith_score) < 8:
-            print("⚠️ WARNING: High hallucination risk detected in this turn.")
+        print(f"► Faithfulness: {faith_score}/10")
+        print(f"► Relevance:    {rel_score}/10")
         print("-" * 40)
         
     except KeyboardInterrupt:

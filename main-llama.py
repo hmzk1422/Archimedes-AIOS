@@ -15,7 +15,7 @@ embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://localho
 # 2. Vector Database Initialization
 # ==========================================
 PERSIST_DIR = "./chroma_db"
-POLICY_FILE = "knowledge/policies/legacy-pro.md"
+POLICY_FILE = "modes/policies/legacy-pro.md"
 
 if not os.path.exists(PERSIST_DIR):
     print("Building fresh Vector Database from Markdown file...")
