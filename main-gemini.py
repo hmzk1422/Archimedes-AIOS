@@ -3,6 +3,9 @@ import re
 import json
 import glob
 import shutil
+import urllib.parse
+import requests
+import tempfile
 from dotenv import load_dotenv
 
 from docling.document_converter import DocumentConverter
@@ -10,7 +13,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
 
-from llama_cloud.client import LlamaCloud
+from llama_cloud import LlamaCloud
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -20,6 +23,8 @@ from langchain_chroma import Chroma
 from langchain_community.chat_message_histories import FileChatMessageHistory
 from langchain_core.tools import tool
 from langchain_core.messages import ToolMessage
+from supabase import create_client, Client
+from langchain_community.vectorstores import SupabaseVectorStore
 
 from modes.policies.tools import toolkit as policies_toolkit
 from modes.administration.tools import toolkit as admin_toolkit
@@ -40,95 +45,149 @@ def extract_text(content):
     return str(content)
 
 # ==========================================
-# 2. Pre-Processing: PDF to Markdown Pipeline (LlamaParse Edition)
+# 2. Pre-Processing: PDF to Markdown Pipeline (Supabase -> LlamaParse -> MD)
 # ==========================================
 
-def preprocess(PDF_DIR, POLICY_DIR, PERSIST_DIR):
-    os.makedirs(PDF_DIR, exist_ok=True)
-    os.makedirs(POLICY_DIR, exist_ok=True)
+# Initialize Supabase Client
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vcqfplrdymwfisbekokp.supabase.co")
+SUPABASE_KEY = os.getenv("SUPADB_API") # <-- Updated to match your .env variable
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase.options.schema = "public"
 
-    print(f"\n--- Checking for PDF Updates in {PDF_DIR} ---")
-    pdf_files = glob.glob(os.path.join(PDF_DIR, "*.pdf"))
-
-    stop_pdf_download = False 
-
-    if not pdf_files or stop_pdf_download:
-        print(f"WARNING: No PDFs found in {PDF_DIR}. Please add your policy PDFs there.")
-    else:
-        # ==========================================
-        # 🟢 MODERN CODE: Initialize LlamaCloud
-        # ==========================================
-        print("Initializing modern LlamaCloud Platform Engine...")
-        client = LlamaCloud()
-
-        for pdf_path in pdf_files:
-            base_name = os.path.basename(pdf_path).replace('.pdf', '')
-            md_output_path = os.path.join(POLICY_DIR, f"{base_name}.md")
-            
-            needs_conversion = True
-            if os.path.exists(md_output_path):
-                if os.path.getmtime(pdf_path) <= os.path.getmtime(md_output_path):
-                    needs_conversion = False
-                    
-            if needs_conversion:
-                print(f"Uploading and scanning PDF via LlamaCloud: {base_name}.pdf ...")
-                
-                # 1. Upload the file to the platform cloud storage
-                file_obj = client.files.create(file=pdf_path, purpose="parse")
-                
-                # 2. Trigger the sync parsing using the multimodal vision 'agentic' tier
-                result = client.parsing.parse(
-                    file_id=file_obj.id,
-                    tier="agentic",       # 🌟 Triggers Multimodal Vision / Graphic Scanning
-                    version="latest",
-                    expand=["markdown"]   # Forces API to pack markdown payload into the response
-                )
-                
-                # 3. Compile the structural markdown pages back together
-                md_content = "\n\n".join([page.markdown for page in result.markdown.pages])
-                
-                with open(md_output_path, "w", encoding="utf-8") as f:
-                    f.write(md_content)
-                print(f"Successfully saved parsed Vision Markdown to {md_output_path}")
-            else:
-                print(f"Skipping {base_name}.pdf (Markdown is already up-to-date).")
-
-    # ==========================================
-    # 3. Vector Database Initialization
-    # ==========================================
-    print("\n--- Initializing Vector Database ---")
+def check_if_md_exists(base_name, datatype_label):
+    """Queries Supabase to see if the MD content for this file already exists."""
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    query_url = f"{rest_url}?filename=eq.{base_name}&datatype=eq.{datatype_label}&select=id"
     
-    if os.path.exists(PERSIST_DIR):
-        print(f"Clearing old Vector Database at {PERSIST_DIR}...")
-        shutil.rmtree(PERSIST_DIR)
+    headers = {
+        "apikey": os.getenv("SUPADB_API"),
+        "Authorization": f"Bearer {os.getenv('SUPADB_API')}"
+    }
+    
+    try:
+        response = requests.get(query_url, headers=headers)
+        if response.status_code == 200:
+            return len(response.json()) > 0
+    except Exception as e:
+        print(f"⚠️ Error checking database for {base_name}: {e}")
+    return False
 
-    print(f"Building fresh Vector Database from Markdown files in {POLICY_DIR}...")
+
+def preprocess(env_prefix="FILE", datatype_label="policies"):
+    print(f"\n--- Processing PDFs directly from Supabase for {datatype_label.upper()} ---")
+    
+    client = LlamaCloud()
+    md_header_splits = []
+    
     headers_to_split_on = [("#", "Header 1"), ("##", "Header 2"), ("###", "Header 3")]
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
 
-    md_header_splits = []
-    policy_files = glob.glob(os.path.join(POLICY_DIR, "*.md"))
+    # 1. Stream files dynamically from .env
+    for key, url in os.environ.items():
+        if key.startswith(env_prefix) and url:
+            try:
+                parsed_url = urllib.parse.urlparse(url)
+                base_name = os.path.basename(parsed_url.path).replace('.pdf', '')
+                
+                # ==========================================
+                # NEW: Check if file already exists in DB
+                # ==========================================
+                if check_if_md_exists(base_name, datatype_label):
+                    print(f"✅ {base_name} already exists in Supabase. Skipping LlamaParse.")
+                    continue
+                
+                print(f"Downloading {base_name}.pdf into memory from Supabase...")
+                response = requests.get(url)
+                response.raise_for_status() 
+                
+                print(f"Uploading {base_name}.pdf directly to LlamaCloud...")
+                file_obj = client.files.create(
+                    file=(f"{base_name}.pdf", response.content, "application/pdf"),
+                    purpose="parse"
+                )
+                
+                result = client.parsing.parse(
+                    file_id=file_obj.id,
+                    tier="agentic",      
+                    version="latest",
+                    expand=["markdown"]   
+                )
+                
+                # Compile the structural markdown into memory
+                md_content = "\n\n".join([page.markdown for page in result.markdown.pages])
+                
+                # ==========================================
+                # NEW: Save Raw Markdown via REST API
+                # ==========================================
+                print("Saving raw Markdown to Supabase table...")
+                rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+                rest_headers = {
+                    "apikey": os.getenv("SUPADB_API"),
+                    "Authorization": f"Bearer {os.getenv('SUPADB_API')}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                }
+                
+                # Added 'filename' to the payload so we can check for it next time
+                payload = {
+                    "data": md_content,
+                    "datatype": datatype_label,
+                    "filename": base_name 
+                }
+                rest_response = requests.post(rest_url, json=payload, headers=rest_headers)
+                
+                if rest_response.status_code in [200, 201]:
+                    print(f"✅ Successfully inserted raw {base_name}.md into Supabase.")
+                else:
+                    print(f"⚠️ Failed to insert raw MD: {rest_response.text}")
 
-    if not policy_files:
-        print(f"CRITICAL WARNING: No .md files found in {POLICY_DIR} to index.")
-    else:
-        for file_path in policy_files:
-            with open(file_path, "r", encoding="utf-8") as f:
-                markdown_document = f.read()
-            
-            splits = markdown_splitter.split_text(markdown_document)
-            filename = os.path.basename(file_path)
-            for split in splits:
-                split.metadata["source"] = filename
-            
-            md_header_splits.extend(splits)
+                # ==========================================
+                # NEW: Chunk and prepare for pgvector
+                # ==========================================
+                splits = markdown_splitter.split_text(md_content)
+                for split in splits:
+                    split.metadata["source"] = base_name
+                    split.metadata["datatype"] = datatype_label
+                
+                md_header_splits.extend(splits)
 
+            except Exception as e:
+                print(f"❌ Failed to process {url}. Error: {e}")
+
+    # ==========================================
+    # 2. Vector Database Initialization (pgvector)
+    # ==========================================
+    print(f"\n--- Initializing pgvector in Supabase for {datatype_label.upper()} ---")
+    
+    # Define SUPABASE_KEY locally if not globally defined for the SupabaseVectorStore
+    SUPABASE_KEY = os.getenv("SUPADB_API")
+        
+    # CHANGE THIS SPECIFIC BLOCK IN YOUR PREPROCESS FUNCTION
     if md_header_splits:
-        vectorstore = Chroma.from_documents(documents=md_header_splits, embedding=embeddings, persist_directory=PERSIST_DIR)
+        vectorstore = SupabaseVectorStore.from_documents(
+            md_header_splits,
+            embeddings,
+            client=supabase,
+            table_name="documents",      
+            query_name="match_documents"
+        )
     else:
-        vectorstore = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
+        # Explicitly use the vectorstore constructor to avoid 'id' ambiguity 
+        # during initialization
+        vectorstore = SupabaseVectorStore(
+            embedding=embeddings,
+            client=supabase,
+            table_name="documents",
+            query_name="match_documents"
+        )
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    # Return the retriever scoped to the specific datatype using metadata filtering
+    retriever = vectorstore.as_retriever(
+        search_kwargs={
+            "k": 5, 
+            "filter": {"datatype": datatype_label}
+        }
+    )
     return retriever
 
 # ==========================================
@@ -273,6 +332,8 @@ def ask_agent(user_input, retrievers):
     print(f"\n[AI Router selected knowledge base: {chosen_stream.upper()}]")
     
     active_retriever = retrievers[chosen_stream]
+    active_llm = llm_with_tools[chosen_stream] # Select the bound LLM
+    
     relevant_chunks = active_retriever.invoke(user_input)
     context_for_ai = "\n\n".join([doc.page_content for doc in relevant_chunks])
     
@@ -291,8 +352,8 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
     messages = [get_dynamic_system_prompt()] + session_history.messages + [HumanMessage(content=turn_payload)]
     
     # Ask the model what it wants to do
-    response_obj = llm_with_tools.invoke(messages)
-    
+    response_obj = active_llm.invoke(messages)
+
     # ==========================================
     # 3. INTERCEPT THE TRIGGER-HAPPY AI
     # ==========================================
@@ -360,17 +421,14 @@ RELEVANCE: <score>
 # ==========================================
 
 print("\n--- Initializing Knowledge Bases ---")
-# Pre-load BOTH databases so the bot can pivot seamlessly
 retrievers = {
     "policies": preprocess(
-        "modes/pdf_source/policies/", 
-        "modes/policies/", 
-        "./chroma_db_policies"
+        env_prefix="FILE", 
+        datatype_label="policies"
     ),
     "administration": preprocess(
-        "modes/pdf_source/administration/", 
-        "modes/administration/", 
-        "./chroma_db_admin"
+        env_prefix="ADMIN_FILE", 
+        datatype_label="administration"
     )
 }
 
