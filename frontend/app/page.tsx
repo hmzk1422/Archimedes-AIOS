@@ -1,10 +1,23 @@
-import ChatInterface from '@/components/ChatInterface';
+import { SiteHeader } from '@/components/site-header'
+import { Hero } from '@/components/hero'
+import { LogoCloud } from '@/components/logo-cloud'
+import { DataIngestion } from '@/components/data-ingestion'
+import { CustomActions } from '@/components/custom-actions'
+import { HowItWorks } from '@/components/how-it-works'
+import { CtaFooter } from '@/components/cta-footer'
 
-export default function Home() {
+export default function Page() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-24">
-      <h1 className="text-4xl font-bold mb-8">Welcome to Allianz</h1>
-      <ChatInterface />
-    </main>
-  );
+    <div className="min-h-screen bg-background text-foreground">
+      <SiteHeader />
+      <main>
+        <Hero />
+        <LogoCloud />
+        <DataIngestion />
+        <CustomActions />
+        <HowItWorks />
+      </main>
+      <CtaFooter />
+    </div>
+  )
 }
