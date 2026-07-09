@@ -1,1 +1,0 @@
-Use concise sentences. Do not use emojis. Use industry-standard technical terminology. If the user is frustrated, use empathetic but professional language.

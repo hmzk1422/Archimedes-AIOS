@@ -18,3 +18,27 @@ Businesses today are drowning in high-volume, low-complexity support tickets tha
 - Omnichannel Consistency: A unified experience across WhatsApp, SMS, Email, and Voice
 - Human-in-the-Loop: A native "Critic" pattern that monitors agent output, ensures compliance, and manages safe escalations to human reps with full interaction history
 - Scalable Efficiency: Built for rapid deployment in high-volume enterprise environments
+
+# Technical Guideline
+Run the following commands.
+**Frontend**
+Go to frontend folder.
+```
+cd frontend
+npm install
+npm run dev
+```
+**API**
+Go to API folder.
+```
+cd api
+python -m venv venv
+venv\scripts\activate.ps1
+python -m pip install -r requirements.txt
+```
+**Starting python file**
+There are 2 files. `company-api` is the simulated third-party side communicating with our platform. `main` is our platform.
+```
+python -m uvicorn main:app --reload
+python -m company-api
+```

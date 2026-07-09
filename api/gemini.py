@@ -21,8 +21,9 @@ from langchain_core.messages import ToolMessage
 from supabase import create_client, Client
 from langchain_community.vectorstores import SupabaseVectorStore
 
-from modes.policies.tools import toolkit as policies_toolkit
-from modes.administration.tools import toolkit as admin_toolkit
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, create_model, Field
+from typing import Any
 
 # ==========================================
 # 1. Setup AI Models
@@ -301,10 +302,15 @@ def ask_agent(user_input, retrievers):
             
             print(f"\n[🔒 USER CONFIRMED: Executing {tool_name} with arguments {tool_args}...]")
             
-            # Map and execute the function
-            tool_map = {tool.name: tool for tool in toolkits}
-            tool_output = tool_map[tool_name].invoke(tool_args)
+            # Map and execute the function across all dynamic toolkits
+            all_available_tools = toolkits["policies"] + toolkits["administration"]
+            tool_map = {tool.name: tool for tool in all_available_tools}
             
+            if tool_name in tool_map:
+                tool_output = tool_map[tool_name].invoke(tool_args)
+            else:
+                tool_output = f"Error: Tool '{tool_name}' not found."
+
             # Print explicit terminal feedback so you know it worked
             print(f"[✅ DATABASE UPDATED]: {tool_output}")
             
@@ -417,34 +423,158 @@ RELEVANCE: <score>
     return faithfulness_score, relevance_score
 
 # ==========================================
-# 8. Chat Loop
+# 7.5 Dynamic Tool Generation
+# ==========================================
+def fetch_dynamic_tasks():
+    print("DEBUG: Entering fetch_dynamic_tasks...")
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    
+    if not rest_url:
+        print("ERROR: CUSTOMER_SERVICE_PROVIDER env var is missing!")
+        return []
+
+    query_url = f"{rest_url}?filename=eq.tasks&datatype=eq.tasks&select=data"
+    headers = {
+        "apikey": os.getenv("SUPADB_API"),
+        "Authorization": f"Bearer {os.getenv('SUPADB_API')}"
+    }
+    
+    try:
+        print(f"DEBUG: Requesting {query_url}")
+        response = requests.get(query_url, headers=headers, timeout=10)
+        print(f"DEBUG: Response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"DEBUG: Data received: {data}")
+            if data:
+                return data[0].get("data", [])
+            else:
+                print("DEBUG: Query returned empty list.")
+        else:
+            print(f"ERROR: Supabase returned {response.status_code}: {response.text}")
+            
+    except Exception as e:
+        print(f"CRITICAL ERROR in fetch_dynamic_tasks: {str(e)}")
+        
+    return []
+
+
+def create_dynamic_tool(task_def):
+    """Converts a JSON task definition into a LangChain StructuredTool."""
+    name = task_def["name"]
+    description = task_def["description"]
+    endpoint = task_def["endpoint"]
+    method = task_def["method"].upper()
+    req_args = task_def.get("required_args", [])
+
+    # FIX 1: Use `Any` instead of `str` so the LLM can output native floats and booleans natively
+    fields = {arg: (Any, Field(..., description=f"The {arg} required for the request")) for arg in req_args}
+    args_schema = create_model(f"{name}Schema", **fields)
+
+    def tool_execution(**kwargs):
+        url = endpoint
+        payload = {}
+        
+        # Replace path variables and build payload
+        for key, value in kwargs.items():
+            if f"{{{key}}}" in url:
+                url = url.replace(f"{{{key}}}", str(value))
+            else:
+                # FIX 2: Sanitize string currency values if the LLM hallucinates them
+                if isinstance(value, str) and key == "amount":
+                    clean_val = value.replace("$", "").replace(",", "").strip()
+                    try:
+                        value = float(clean_val)
+                    except ValueError:
+                        pass # Let FastAPI handle the validation error naturally
+                
+                # FIX 3: Flatten nested "request" objects if your DB specifies "request" as a required arg
+                if key == "request" and isinstance(value, (dict, str)):
+                    if isinstance(value, str) and value.strip().startswith("{"):
+                        try:
+                            payload.update(json.loads(value))
+                        except json.JSONDecodeError:
+                            payload[key] = value
+                    elif isinstance(value, dict):
+                        payload.update(value)
+                    continue
+
+                payload[key] = value
+
+        try:
+            if method == "GET":
+                response = requests.get(url)
+            elif method == "POST":
+                response = requests.post(url, json=payload)
+            else:
+                return f"Unsupported HTTP method: {method}"
+            
+            # FIX 4: Better error logging to see EXACTLY why FastAPI rejected it
+            if not response.ok:
+                return f"API Validation Error ({response.status_code}): {response.text}"
+                
+            response.raise_for_status() 
+            return f"Success. Response: {response.text}"
+            
+        except requests.exceptions.RequestException as e:
+            return f"API Connection Error: {str(e)}"
+
+    return StructuredTool.from_function(
+        func=tool_execution,
+        name=name,
+        description=description,
+        args_schema=args_schema
+    )
+
+# ==========================================
+# 8. Chat Loop & Dynamic Tool Initialization
 # ==========================================
 
 print("\n--- Initializing Knowledge Bases ---")
 retrievers = {
-    "policies": preprocess(
-        env_prefix="FILE", 
-        datatype_label="policies"
-    ),
-    "administration": preprocess(
-        env_prefix="ADMIN_FILE", 
-        datatype_label="administration"
-    )
+    "policies": preprocess(env_prefix="FILE", datatype_label="policies"),
+    "administration": preprocess(env_prefix="ADMIN_FILE", datatype_label="administration")
 }
 
-# 🌟 NEW: Create a dictionary of toolkits
+# Fetch and Parse Dynamic Tools
+raw_tasks_data = fetch_dynamic_tasks()
+
+# FIX: Parse if it came back as a string, otherwise use as dict
+if isinstance(raw_tasks_data, str):
+    tasks_json = json.loads(raw_tasks_data).get("tasks", [])
+else:
+    # If the DB returned the dict directly
+    tasks_json = raw_tasks_data.get("tasks", []) if isinstance(raw_tasks_data, dict) else []
+
+policies_toolkit = []
+admin_toolkit = []
+
+for task in tasks_json:
+    # Ensure task is a dictionary before passing to generator
+    if isinstance(task, dict):
+        langchain_tool = create_dynamic_tool(task)
+        
+        datatype = task.get("datatype", "").upper()
+        if datatype == "POLICIES":
+            policies_toolkit.append(langchain_tool)
+        elif datatype == "ADMINISTRATION":
+            admin_toolkit.append(langchain_tool)
+    else:
+        print(f"Skipping invalid task format: {task}")
+
 toolkits = {
     "policies": policies_toolkit,
     "administration": admin_toolkit
 }
 
-# 🌟 NEW: Bind the tools specifically to different instances of the LLM
+# Bind tools to specific LLM instances
 llm_with_tools = {
     "policies": llm.bind_tools(policies_toolkit) if policies_toolkit else llm,
     "administration": llm.bind_tools(admin_toolkit) if admin_toolkit else llm
 }
 
-# Unify memory so context isn't lost if they switch between policies and administration
+# Unify memory
 PROFILE_FILE = "memory/unified_user_profile.json"
 HISTORY_FILE = "memory/unified_chat_history.json"
 session_history = FileChatMessageHistory(HISTORY_FILE)
