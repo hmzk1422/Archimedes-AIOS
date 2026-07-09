@@ -2,85 +2,93 @@
 
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { Send, Bot, User, Loader2, Sparkles } from 'lucide-react';
 
 export default function ChatInterface() {
   const [messages, setMessages] = useState([
-    { role: 'bot', content: 'Hello! Welcome to Allianz Customer Service. How can I help you today?' }
+    { role: 'bot', content: 'Hello! Welcome to **Allianz Customer Service**. How can I assist you today?' }
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
   const sendMessage = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || loading) return;
 
     const userMessage = input;
-    // 1. Add user message
     setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
     setInput('');
     setLoading(true);
 
     try {
-      // 2. Fetch from your Python backend
       const response = await fetch('http://localhost:8000/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMessage }),
       });
-
-      if (!response.ok) throw new Error('Network response was not ok');
-
       const data = await response.json();
-
-      // 3. Add AI response
       setMessages((prev) => [...prev, { role: 'bot', content: data.response }]);
-    } catch (error) {
-      setMessages((prev) => [...prev, { 
-        role: 'bot', 
-        content: '⚠️ Sorry, I am having trouble connecting to the backend. Ensure your FastAPI server is running on port 8000.' 
-      }]);
+    } catch {
+      setMessages((prev) => [...prev, { role: 'bot', content: '⚠️ Connection failed.' }]);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-600px w-full max-w-2xl border rounded-2xl shadow-xl overflow-hidden bg-white">
-      {/* Chat History Area */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+    <div className="flex flex-col h-[600px] w-full max-w-2xl bg-card border border-border rounded-xl shadow-lg overflow-hidden">
+      {/* Header */}
+      <div className="px-6 py-4 border-b border-border flex items-center gap-3 bg-card">
+        <div className="p-2 bg-primary/10 rounded-full text-primary">
+          <Sparkles size={20} />
+        </div>
+        <h2 className="font-semibold text-card-foreground">Support Assistant</h2>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-background">
         {messages.map((m, i) => (
-          <div 
-            key={i} 
-            className={`p-4 rounded-2xl max-w-[85%] ${
-              m.role === 'bot' 
-                ? 'bg-gray-100 text-black rounded-bl-none' 
-                : 'bg-blue-600 text-white ml-auto rounded-br-none'
-            }`}
-          >
-            {/* Markdown Rendering with Tailwind Typography */}
-            <div className="prose prose-sm max-w-none dark:prose-invert">
-              <ReactMarkdown>
-                {m.content}
-              </ReactMarkdown>
+          <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${m.role === 'bot' ? 'bg-primary/20 text-primary' : 'bg-muted text-muted-foreground'}`}>
+              {m.role === 'bot' ? <Bot size={16} /> : <User size={16} />}
+            </div>
+            <div className={`p-4 rounded-xl max-w-[80%] ${m.role === 'bot' ? 'bg-muted text-foreground' : 'bg-primary text-primary-foreground'}`}>
+              <div className="prose prose-sm dark:prose-invert max-w-none">
+                <ReactMarkdown>{m.content}</ReactMarkdown>
+              </div>
             </div>
           </div>
         ))}
         {loading && (
-          <div className="p-4 bg-gray-100 rounded-2xl rounded-bl-none w-fit text-gray-500 italic">
-            AI is thinking...
+          <div className="flex gap-3">
+            <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary">
+              <Bot size={16} />
+            </div>
+            <div className="p-4 bg-muted text-muted-foreground rounded-xl flex items-center gap-2">
+              <Loader2 className="animate-spin" size={16} />
+              Thinking...
+            </div>
           </div>
         )}
       </div>
 
-      {/* Input Area */}
-      <div className="border-t p-4 bg-white text-black">
-        <input 
-          className="w-full outline-none text-base" 
-          placeholder="Type your question here..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-          disabled={loading}
-        />
+      {/* Input */}
+      <div className="p-4 border-t border-border bg-card">
+        <div className="flex items-center gap-2 bg-input/50 p-2 rounded-lg focus-within:ring-2 ring-ring transition-all">
+          <input 
+            className="flex-1 bg-transparent px-3 py-1 outline-none text-foreground placeholder:text-muted-foreground" 
+            placeholder="Ask anything..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+          />
+          <button 
+            onClick={sendMessage}
+            disabled={loading}
+            className="p-2 bg-primary text-primary-foreground hover:opacity-90 rounded-md transition-colors disabled:opacity-50"
+          >
+            <Send size={18} />
+          </button>
+        </div>
       </div>
     </div>
   );
