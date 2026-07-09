@@ -1,0 +1,23 @@
+# Web Framework
+fastapi
+uvicorn
+
+# AI/LLM & LangChain
+langchain
+langchain-ollama
+langchain-google-genai
+langchain-chroma
+langchain-community
+langchain-core
+llama-cloud
+
+# Database/Storage
+supabase
+# Note: SupabaseVectorStore uses langchain-community, 
+# but ensure you have the postgres driver
+psycopg2-binary 
+
+# Environment & Utilities
+python-dotenv
+requests
+pydantic
