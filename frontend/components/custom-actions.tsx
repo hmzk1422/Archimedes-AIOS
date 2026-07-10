@@ -5,7 +5,7 @@ const tiers = [
     icon: Boxes,
     title: 'Prebuilt tools',
     desc: 'Refunds, order lookups, escalations, CRM updates, and 100+ actions maintained by our team — production-ready on day one.',
-    tag: 'By Relay',
+    tag: 'By Seneca',
   },
   {
     icon: Users,

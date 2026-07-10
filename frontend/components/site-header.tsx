@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { Menu, X, Waypoints } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import Link from 'next/link'
 
 const navLinks = [
   { label: 'Product', href: '#ingestion' },
@@ -21,7 +22,7 @@ export function SiteHeader() {
           <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <Waypoints className="size-5" />
           </span>
-          <span className="font-display text-lg font-bold tracking-tight">Relay</span>
+          <span className="font-display text-lg font-bold tracking-tight">Seneca</span>
         </a>
 
         <nav className="hidden items-center gap-8 md:flex">
@@ -38,7 +39,9 @@ export function SiteHeader() {
 
         <div className="hidden items-center gap-2 md:flex">
           <Button variant="ghost" className="text-muted-foreground hover:text-foreground">
-            Sign in
+            <Link href="/auth">
+              Sign in
+            </Link>
           </Button>
           <Button className="bg-primary text-primary-foreground hover:bg-primary/90">
             Get started

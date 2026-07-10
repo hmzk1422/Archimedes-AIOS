@@ -50,11 +50,16 @@ SUPABASE_KEY = os.getenv("SUPADB_API") # <-- Updated to match your .env variable
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase.options.schema = "public"
 
-def check_if_md_exists(base_name, datatype_label):
+def check_if_md_exists(base_name, datatype_label, tenant_id=None):
     """Queries Supabase to see if the MD content for this file already exists."""
     rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
-    query_url = f"{rest_url}?filename=eq.{base_name}&datatype=eq.{datatype_label}&select=id"
-    
+    query_parts = [f"filename=eq.{base_name}", f"datatype=eq.{datatype_label}"]
+
+    if tenant_id:
+        query_parts.append(f"tenant_id=eq.{tenant_id}")
+
+    query_url = f"{rest_url}?{'&'.join(query_parts)}&select=id"
+
     headers = {
         "apikey": os.getenv("SUPADB_API"),
         "Authorization": f"Bearer {os.getenv('SUPADB_API')}"
@@ -69,88 +74,124 @@ def check_if_md_exists(base_name, datatype_label):
     return False
 
 
-def preprocess(env_prefix="FILE", datatype_label="policies"):
-    print(f"\n--- Processing PDFs directly from Supabase for {datatype_label.upper()} ---")
-    
+def preprocess(tenant_id=None, datatype_label="policies"):
+    print(f"\n--- Processing PDFs from Supabase Storage for {datatype_label.upper()} ---")
+
     client = LlamaCloud()
     md_header_splits = []
-    
+
     headers_to_split_on = [("#", "Header 1"), ("##", "Header 2"), ("###", "Header 3")]
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
 
-    # 1. Stream files dynamically from .env
-    for key, url in os.environ.items():
-        if key.startswith(env_prefix) and url:
+    tenant_scope = tenant_id or ""
+
+    try:
+        bucket_name = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
+        # List objects under tenant and datatype subfolder if provided
+        list_path = f"{tenant_scope}/{datatype_label}".strip("/") if tenant_scope or datatype_label else ""
+        storage_objects = supabase.storage.from_(bucket_name).list(path=list_path)
+    except Exception as exc:
+        print(f"❌ Failed to list Supabase Storage bucket: {exc}")
+        return []
+
+    for item in storage_objects or []:
+        raw_name = (item.get("name") or "").strip()
+        if not raw_name or raw_name in {".", ".."}:
+            continue
+
+        # Skip folders
+        if raw_name.endswith("/"):
+            continue
+
+        # Determine the relative object path inside the bucket. When listing with
+        # a `list_path`, some SDKs return only the filename, others return the
+        # full relative path. Normalize to avoid double-prefixing.
+        if list_path and raw_name.startswith(list_path):
+            relative_path = raw_name
+        elif '/' in raw_name and not list_path:
+            relative_path = raw_name
+        else:
+            relative_path = f"{list_path}/{raw_name}".strip("/") if list_path else raw_name
+
+        # Use basename for filename/extension checks and DB filename keys
+        filename_only = os.path.basename(relative_path)
+        ext = os.path.splitext(filename_only)[1].lower()
+        if ext != ".pdf":
+            print(f"⏭️ Skipping non-PDF object: {relative_path}")
+            continue
+
+        try:
+            base_name = os.path.splitext(filename_only)[0]
+            object_path = relative_path
+
+            if check_if_md_exists(base_name, datatype_label, tenant_id=tenant_scope or None):
+                print(f"✅ {base_name} already exists in Supabase. Skipping LlamaParse.")
+                continue
+
             try:
-                parsed_url = urllib.parse.urlparse(url)
-                base_name = os.path.basename(parsed_url.path).replace('.pdf', '')
-                
-                # ==========================================
-                # NEW: Check if file already exists in DB
-                # ==========================================
-                if check_if_md_exists(base_name, datatype_label):
-                    print(f"✅ {base_name} already exists in Supabase. Skipping LlamaParse.")
-                    continue
-                
-                print(f"Downloading {base_name}.pdf into memory from Supabase...")
-                response = requests.get(url)
-                response.raise_for_status() 
-                
-                print(f"Uploading {base_name}.pdf directly to LlamaCloud...")
-                file_obj = client.files.create(
-                    file=(f"{base_name}.pdf", response.content, "application/pdf"),
-                    purpose="parse"
-                )
-                
-                result = client.parsing.parse(
-                    file_id=file_obj.id,
-                    tier="agentic",      
-                    version="latest",
-                    expand=["markdown"]   
-                )
-                
-                # Compile the structural markdown into memory
-                md_content = "\n\n".join([page.markdown for page in result.markdown.pages])
-                
-                # ==========================================
-                # NEW: Save Raw Markdown via REST API
-                # ==========================================
-                print("Saving raw Markdown to Supabase table...")
-                rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
-                rest_headers = {
-                    "apikey": os.getenv("SUPADB_API"),
-                    "Authorization": f"Bearer {os.getenv('SUPADB_API')}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal"
-                }
-                
-                # Added 'filename' to the payload so we can check for it next time
-                payload = {
-                    "data": md_content,
-                    "datatype": datatype_label,
-                    "filename": base_name,
-                    "tenant_id": "001"  # 🌟 ADD THIS
-                }
-                rest_response = requests.post(rest_url, json=payload, headers=rest_headers)
-                
-                if rest_response.status_code in [200, 201]:
-                    print(f"✅ Successfully inserted raw {base_name}.md into Supabase.")
-                else:
-                    print(f"⚠️ Failed to insert raw MD: {rest_response.text}")
+                signed_url_response = supabase.storage.from_(bucket_name).create_signed_url(object_path, 3600)
+            except Exception as signed_exc:
+                print(f"⚠️ Could not create signed URL for {object_path}: {signed_exc}")
+                continue
 
-                # ==========================================
-                # NEW: Chunk and prepare for pgvector
-                # ==========================================
-                splits = markdown_splitter.split_text(md_content)
-                for split in splits:
-                    split.metadata["source"] = base_name
-                    split.metadata["datatype"] = datatype_label
-                    split.metadata["tenant_id"] = "001" # 🌟 ADD THIS
-                
-                md_header_splits.extend(splits)
+            signed_url = signed_url_response.get("signedURL") if isinstance(signed_url_response, dict) else None
 
-            except Exception as e:
-                print(f"❌ Failed to process {url}. Error: {e}")
+            if not signed_url:
+                print(f"⚠️ Could not create signed URL for {object_path}")
+                continue
+
+            print(f"Downloading {base_name}.pdf from storage...")
+            response = requests.get(signed_url)
+            response.raise_for_status()
+
+            print(f"Uploading {base_name}.pdf directly to LlamaCloud...")
+            file_obj = client.files.create(
+                file=(f"{base_name}.pdf", response.content, "application/pdf"),
+                purpose="parse"
+            )
+
+            result = client.parsing.parse(
+                file_id=file_obj.id,
+                tier="agentic",
+                version="latest",
+                expand=["markdown"]
+            )
+
+            md_content = "\n\n".join([page.markdown for page in result.markdown.pages])
+
+            print("Saving raw Markdown to Supabase table...")
+            rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+            rest_headers = {
+                "apikey": os.getenv("SUPADB_API"),
+                "Authorization": f"Bearer {os.getenv('SUPADB_API')}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }
+
+            payload = {
+                "data": md_content,
+                "datatype": datatype_label,
+                "filename": base_name,
+                "tenant_id": tenant_scope
+            }
+            rest_response = requests.post(rest_url, json=payload, headers=rest_headers)
+
+            if rest_response.status_code in [200, 201]:
+                print(f"✅ Successfully inserted raw {base_name}.md into Supabase.")
+            else:
+                print(f"⚠️ Failed to insert raw MD: {rest_response.text}")
+
+            splits = markdown_splitter.split_text(md_content)
+            for split in splits:
+                split.metadata["source"] = base_name
+                split.metadata["datatype"] = datatype_label
+                split.metadata["tenant_id"] = tenant_scope
+
+            md_header_splits.extend(splits)
+
+        except Exception as e:
+            item_display = locals().get('filename_only') or locals().get('relative_path') or locals().get('raw_name') or 'unknown'
+            print(f"❌ Failed to process {item_display}. Error: {e}")
 
     # ==========================================
     # 2. Vector Database Initialization (pgvector)
@@ -166,7 +207,7 @@ def preprocess(env_prefix="FILE", datatype_label="policies"):
             md_header_splits,
             embeddings,
             client=supabase,
-            table_name="documents",      
+            table_name="documents",
             query_name="match_documents"
         )
     else:
@@ -180,13 +221,15 @@ def preprocess(env_prefix="FILE", datatype_label="policies"):
         )
 
     # Return the retriever scoped to the specific datatype using metadata filtering
+    # Build filter dynamically: include tenant_id only when present
+    filter_kwargs = {"datatype": datatype_label}
+    if tenant_scope:
+        filter_kwargs["tenant_id"] = tenant_scope
+
     retriever = vectorstore.as_retriever(
         search_kwargs={
             "k": 5,
-            "filter": {
-                "tenant_id": "001",  # e.g., "001"
-                "datatype": datatype_label       # e.g., "policies"
-            }
+            "filter": filter_kwargs
         }
     )
     return retriever
@@ -287,7 +330,7 @@ CRITICAL COMPLIANCE RULES:
 session_state = {
     "pending_tool_call": None,  # Stores the tool data when waiting for confirmation
 }
-def ask_agent(user_input, retrievers):
+def ask_agent(user_input, retrievers, tenant_id=None):
     global session_state
     
     # ==========================================
@@ -339,8 +382,12 @@ def ask_agent(user_input, retrievers):
     
     active_retriever = retrievers[chosen_stream]
     active_llm = llm_with_tools[chosen_stream] # Select the bound LLM
-    
-    relevant_chunks = active_retriever.invoke(user_input)
+
+    if tenant_id:
+        relevant_chunks = active_retriever.invoke(user_input)
+        relevant_chunks = [chunk for chunk in relevant_chunks if getattr(chunk.metadata, 'get', lambda *_args, **_kwargs: None)('tenant_id') == tenant_id]
+    else:
+        relevant_chunks = active_retriever.invoke(user_input)
     context_for_ai = "\n\n".join([doc.page_content for doc in relevant_chunks])
     
     # UPDATED: Instruct the AI to STOP talking and call the tool when data is ready
@@ -532,10 +579,18 @@ def create_dynamic_tool(task_def):
 # ==========================================
 
 print("\n--- Initializing Knowledge Bases ---")
-retrievers = {
-    "policies": preprocess(env_prefix="FILE", datatype_label="policies"),
-    "administration": preprocess(env_prefix="ADMIN_FILE", datatype_label="administration")
-}
+def get_retrievers_for_tenant(tenant_id: str | None):
+    """Create and return retrievers scoped to a specific tenant id.
+
+    This builds per-datatype retrievers by running the preprocess flow
+    for the requested tenant. It avoids running a global preprocessing pass
+    at module import time so new uploads are associated with the correct
+    tenant id.
+    """
+    return {
+        "policies": preprocess(tenant_id=tenant_id, datatype_label="policies"),
+        "administration": preprocess(tenant_id=tenant_id, datatype_label="administration")
+    }
 
 # Fetch and Parse Dynamic Tools
 raw_tasks_data = fetch_dynamic_tasks()

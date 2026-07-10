@@ -27,8 +27,7 @@ export function Hero() {
             </h1>
           </div>
           <p className="text-pretty text-lg leading-relaxed text-muted-foreground">
-            Relay is the customer service AI agent that ingests any data you throw at it — no clean
-            schema required — and takes real action with prebuilt, community, or self-built tools.
+            Seneca is the customer-service AI agent that ingests any data you throw at it — no clean schema required — and takes real action with prebuilt, community, or self-built tools.
           </p>
         </div>
 

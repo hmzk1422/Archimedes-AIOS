@@ -49,7 +49,7 @@ export function CtaFooter() {
               <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                 <Waypoints className="size-5" />
               </span>
-              <span className="font-display text-lg font-bold tracking-tight">Relay</span>
+              <span className="font-display text-lg font-bold tracking-tight">Seneca</span>
             </a>
             <p className="mt-4 max-w-xs text-sm text-muted-foreground">
               The customer service AI agent that ingests any data and takes real action.
@@ -74,7 +74,7 @@ export function CtaFooter() {
           ))}
         </div>
         <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t border-border/60 pt-6 text-sm text-muted-foreground sm:flex-row">
-          <p>© {new Date().getFullYear()} Relay Labs, Inc. All rights reserved.</p>
+          <p>© {new Date().getFullYear()} Seneca Labs, Inc. All rights reserved.</p>
           <div className="flex gap-6">
             <a href="#" className="transition-colors hover:text-foreground">
               Privacy
