@@ -6,7 +6,7 @@ import { Send, Bot, User, Loader2, Sparkles } from 'lucide-react';
 
 export default function ChatInterface({ tenantId }: { tenantId: string }) {
   const [messages, setMessages] = useState([
-    { role: 'bot', content: 'Hello! Welcome to **Allianz Customer Service**. How can I assist you today?' }
+    { role: 'bot', content: 'Hello! How can I assist you today?' }
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
