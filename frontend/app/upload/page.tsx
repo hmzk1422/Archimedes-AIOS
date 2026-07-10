@@ -8,7 +8,9 @@ import { createClient } from '@/utils/supabase/client'
 export default function UploadPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [status, setStatus] = useState('')
-  const [datatype, setDatatype] = useState('policies')
+  const [datatype, setDatatype] = useState('')
+  const [datatypes, setDatatypes] = useState<string[]>([])
+  const [newDatatype, setNewDatatype] = useState('')
   const [loading, setLoading] = useState(false)
   const [userId, setUserId] = useState<string | null>(null)
   const [checkingUser, setCheckingUser] = useState(true)
@@ -26,16 +28,39 @@ export default function UploadPage() {
 
       setUserId(user.id)
       setCheckingUser(false)
+      // Strictly fetch datatypes from the server based on user UUID
+      try {
+        await refreshFromServer(user.id)
+      } catch (e) {
+        setStatus('Failed to load datatypes.')
+      }
     }
 
     loadUser()
   }, [router])
+
+  function addDatatype() {
+    const candidate = (newDatatype || '').trim()
+    if (!candidate) return
+    const normalized = candidate.toLowerCase().replace(/[^a-z0-9_-]/g, '')
+    if (!normalized) return
+    
+    // Replace current selection with newly added datatype
+    setDatatypes([normalized])
+    setDatatype(normalized)
+    setNewDatatype('')
+  }
 
   async function handleUpload(event: FormEvent) {
     event.preventDefault()
 
     if (!selectedFile) {
       setStatus('Please choose a PDF file first.')
+      return
+    }
+
+    if (!datatype) {
+      setStatus('Please select or add a datatype.')
       return
     }
 
@@ -52,7 +77,7 @@ export default function UploadPage() {
 
     try {
       const bucket = process.env.NEXT_PUBLIC_SUPABASE_BUCKET || 'customer-service-provider'
-      // Upload into tenant-scoped datatype subfolder, e.g. <userId>/policies/file.pdf
+      // Strictly scope path to UUID
       const storagePath = `${user.id}/${datatype}/${selectedFile.name}`
 
       const { error } = await supabase.storage.from(bucket).upload(storagePath, selectedFile, {
@@ -65,10 +90,64 @@ export default function UploadPage() {
 
       setStatus(`Upload complete. File stored at ${bucket}/${storagePath}`)
       setSelectedFile(null)
+      // Refresh to ensure the new folder structure maps instantly
+      await refreshFromServer(user.id)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Upload failed')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function refreshFromServer(userIdOverride?: string) {
+    const targetUser = userIdOverride || userId
+    if (!targetUser) {
+      setStatus('Sign in to refresh datatypes from storage')
+      return
+    }
+    setStatus('Refreshing datatypes from storage...')
+    try {
+      const api = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const res = await fetch(`${api}/storage-list?tenant_id=${encodeURIComponent(targetUser)}`)
+      const data = await res.json()
+      
+      if (data?.status === 'ok' && Array.isArray(data.items)) {
+        const discovered = new Set<string>()
+        for (const name of data.items) {
+          if (!name) continue
+          const n = String(name)
+          
+          // --- FIX APPLIED RIGHT HERE ---
+          if (n.endsWith('/')) {
+            const seg = n.replace(/\/+$/, '').split('/').pop()
+            if (seg) discovered.add(seg.toLowerCase())
+          } else if (n.includes('/')) {
+            discovered.add(n.split('/')[0].toLowerCase())
+          } else {
+            // Supabase returns folder names at this nested level without slashes. 
+            // We capture them here, ignoring root files with extensions (e.g. .pdf)
+            if (!n.includes('.')) {
+              discovered.add(n.toLowerCase())
+            }
+          }
+          // ------------------------------
+        }
+        const cleaned = Array.from(discovered).map(s => s.replace(/[^a-z0-9_-]/g, '')).filter(Boolean)
+        
+        if (cleaned.length === 0) {
+          setStatus('No datatypes discovered in storage for this user')
+          setDatatypes([])
+          setDatatype('')
+        } else {
+          setDatatypes(cleaned)
+          setDatatype(cleaned[0])
+          setStatus('Datatypes refreshed from storage')
+        }
+      } else {
+        setStatus(data?.message || 'Failed to fetch storage list')
+      }
+    } catch (e) {
+      setStatus(String(e))
     }
   }
 
@@ -94,14 +173,36 @@ export default function UploadPage() {
             <div className="rounded-xl border border-dashed border-border bg-background/70 p-6">
               <label className="block text-sm font-medium text-foreground">Choose PDF file</label>
               <label className="block mt-3 text-sm font-medium text-foreground">Datatype</label>
-              <select
-                value={datatype}
-                onChange={(e) => setDatatype(e.target.value)}
-                className="mt-2 mb-3 block w-48 rounded border border-border bg-card px-3 py-2 text-sm"
-              >
-                <option value="policies">Policies</option>
-                <option value="administration">Administration</option>
-              </select>
+              <div className="flex items-center gap-3">
+                <select
+                  value={datatype}
+                  onChange={(e) => setDatatype(e.target.value)}
+                  className="mt-2 mb-3 block w-48 rounded border border-border bg-card px-3 py-2 text-sm"
+                  disabled={datatypes.length === 0}
+                >
+                  {datatypes.length === 0 && <option value="">No datatypes...</option>}
+                  {datatypes.map((dt) => (
+                    <option key={dt} value={dt}>{dt}</option>
+                  ))}
+                </select>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    value={newDatatype}
+                    onChange={(e) => setNewDatatype(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDatatype() } }}
+                    placeholder="Add type"
+                    className="mt-2 block w-36 rounded border border-border bg-card px-3 py-2 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={addDatatype}
+                    className="mt-2 rounded bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
               <input
                 type="file"
                 accept="application/pdf"
@@ -115,7 +216,7 @@ export default function UploadPage() {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || (!datatype && !newDatatype)}
               className="rounded-lg bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {loading ? 'Uploading...' : 'Upload PDF'}
@@ -129,9 +230,18 @@ export default function UploadPage() {
           </div>
         ) : null}
 
-        {userId ? (
+        <div className="mt-4 text-sm text-muted-foreground">
+          Current datatypes: {datatypes.length ? datatypes.map((d) => (
+            <span key={d} className="inline-block mr-2 rounded bg-muted px-2 py-1 text-xs font-medium text-foreground">{d}</span>
+          )) : <span className="text-sm text-red-400">No datatypes found for your account</span>}
+          <div className="mt-3 flex items-center gap-3">
+            <button type="button" onClick={() => refreshFromServer()} className="rounded bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground">Refresh from storage</button>
+          </div>
+        </div>
+
+        {userId && (datatype || newDatatype) ? (
           <div className="mt-4 text-sm text-muted-foreground">
-            Upload destination: <span className="font-medium text-foreground">{userId}/{datatype}/your-file.pdf</span>
+            Upload destination: <span className="font-medium text-foreground">{userId}/{datatype || newDatatype}/your-file.pdf</span>
           </div>
         ) : null}
       </div>

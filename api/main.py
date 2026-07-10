@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -46,3 +47,17 @@ async def chat_endpoint(request: ChatRequest):
     retrievers = get_retrievers_for_tenant(request.tenant_id)
     response, _ = ask_agent(request.message, retrievers, tenant_id=request.tenant_id)
     return {"response": response}
+
+
+@app.get("/storage-list")
+async def storage_list(tenant_id: str | None = None):
+    """Debug endpoint: return the list of object names under the tenant root."""
+    bucket = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
+    tenant_scope = (tenant_id or "").strip("/")
+    try:
+        items = preprocess.__globals__["supabase"].storage.from_(bucket).list(path=tenant_scope)
+        # Return simplified list of names
+        names = [i.get("name") for i in (items or [])]
+        return {"status": "ok", "items": names}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

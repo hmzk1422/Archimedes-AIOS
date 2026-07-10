@@ -237,11 +237,18 @@ def preprocess(tenant_id=None, datatype_label="policies"):
 # ==========================================
 # 4. Long-Term Memory Engine (User Profile)
 # ==========================================
-PROFILE_FILE = "memory/user_profile.json"
-HISTORY_FILE = "memory/chat_history.json"
 os.makedirs("memory", exist_ok=True)
 
-def load_user_profile():
+def _profile_path_for(tenant_id: str | None):
+    key = tenant_id or "global"
+    return f"memory/user_profile_{key}.json"
+
+def _history_path_for(tenant_id: str | None):
+    key = tenant_id or "global"
+    return f"memory/chat_history_{key}.json"
+
+def load_user_profile(tenant_id: str | None = None):
+    PROFILE_FILE = _profile_path_for(tenant_id)
     if os.path.exists(PROFILE_FILE):
         with open(PROFILE_FILE, "r") as f:
             try:
@@ -250,11 +257,13 @@ def load_user_profile():
                 return {}
     return {}
 
-def save_user_profile(profile_data):
+def save_user_profile(profile_data, tenant_id: str | None = None):
+    PROFILE_FILE = _profile_path_for(tenant_id)
     with open(PROFILE_FILE, "w") as f:
         json.dump(profile_data, f, indent=4)
 
-def extract_and_update_facts(user_input, current_profile):
+
+def extract_and_update_facts(user_input, current_profile, tenant_id: str | None = None):
     extractor_prompt = f"""You are a data extraction assistant. Look at the user's input and extract any hard personal facts (e.g., age, occupation, medical conditions, budget).
     
     Current User Profile: {json.dumps(current_profile)}
@@ -269,41 +278,62 @@ def extract_and_update_facts(user_input, current_profile):
         raw_content = extract_text(response.content)
         clean_json_string = raw_content.strip().strip('`').replace('json\n', '', 1)
         updated_profile = json.loads(clean_json_string)
-        save_user_profile(updated_profile)
+        save_user_profile(updated_profile, tenant_id)
         return updated_profile
     except Exception:
         return current_profile
+        
+# Cache of FileChatMessageHistory per tenant to avoid reopening files repeatedly
+_session_history_cache: dict = {}
 
-session_history = FileChatMessageHistory(HISTORY_FILE)
+def get_session_history(tenant_id: str | None = None):
+    path = _history_path_for(tenant_id)
+    if path not in _session_history_cache:
+        _session_history_cache[path] = FileChatMessageHistory(path)
+    return _session_history_cache[path]
 
 # ==========================================
 # 5. Guardrailed System Prompt & Information Routing
 # ==========================================
 
-def get_routing_decision(user_input):
+def get_routing_decision(user_input, available_streams):
     """Uses the LLM to categorize the user's intent to route to the correct database."""
-    router_prompt = f"""You are an intelligent routing assistant for an insurance bot.
-    Analyze the user's input and categorize it into exactly one of these two streams:
-    - "policies": Questions about products, coverage, benefits, quotes, or general rules.
-    - "administration": Questions about filing claims, updating personal details, billing, or account management.
-
+    
+    # If no streams exist, default to policies safely
+    if not available_streams:
+        return "policies"
+        
+    # 🌟 FIX: If there's only 1 stream (e.g., Amazon only has 'research'), skip the LLM and return it!
+    if len(available_streams) == 1:
+        return available_streams[0]
+        
+    streams_str = ", ".join([f'"{s}"' for s in available_streams])
+    
+    router_prompt = f"""You are an intelligent routing assistant.
+    Analyze the user's input and categorize it into exactly ONE of these available streams:
+    {streams_str}
+    
     User Input: "{user_input}"
     
-    Respond with ONLY the exact word "policies" or "administration". No other text, no markdown."""
+    Respond with ONLY the exact word of the selected stream. No other text, no markdown."""
     
     try:
         response = llm.invoke([HumanMessage(content=router_prompt)])
         decision = extract_text(response.content).strip().lower()
         
-        # Fallback handling just in case the LLM gets chatty
-        if "admin" in decision or "claim" in decision:
-            return "administration"
-        return "policies" 
+        # Clean up the output to prevent routing errors
+        decision = re.sub(r'[^a-z0-9_-]', '', decision)
+        
+        if decision in available_streams:
+            return decision
     except Exception:
-        return "policies" # Default safe fallback
+        pass
+        
+    # Safe fallback to the first available datatype
+    return available_streams[0]
 
-def get_dynamic_system_prompt():
-    profile = load_user_profile()
+def get_dynamic_system_prompt(tenant_id: str | None = None):
+    profile = load_user_profile(tenant_id)
     profile_text = json.dumps(profile, indent=2) if profile else "No user data collected yet."
     
     return SystemMessage(content=f"""You are a helpful, meticulous policy verification clerk for an insurance agency offering multiple plans.
@@ -333,20 +363,32 @@ session_state = {
 def ask_agent(user_input, retrievers, tenant_id=None):
     global session_state
     
+    # Use per-tenant session state
+    tenant_key = tenant_id or 'global'
+    if isinstance(session_state, dict):
+        # already migrated
+        pass
+    else:
+        # backward compatibility
+        session_state = {}
+    if tenant_key not in session_state:
+        session_state[tenant_key] = {"pending_tool_call": None}
+    tenant_state = session_state[tenant_key]
     # ==========================================
     # 1. GATE CHECK (Pending Tool Confirmation)
     # ==========================================
-    if session_state["pending_tool_call"] is not None:
+    if tenant_state["pending_tool_call"] is not None:
         if user_input.lower() in ["yes", "y", "confirm", "proceed", "sure"]:
             # User gave explicit permission! Run the saved tool.
-            tool_call = session_state["pending_tool_call"]
+            tool_call = tenant_state["pending_tool_call"]
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             
             print(f"\n[🔒 USER CONFIRMED: Executing {tool_name} with arguments {tool_args}...]")
             
-            # Map and execute the function across all dynamic toolkits
-            all_available_tools = toolkits["policies"] + toolkits["administration"]
+            # Map and execute the function across per-tenant dynamic toolkits
+            toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
+            all_available_tools = toolkits_local.get("policies", []) + toolkits_local.get("administration", [])
             tool_map = {tool.name: tool for tool in all_available_tools}
             
             if tool_name in tool_map:
@@ -358,34 +400,75 @@ def ask_agent(user_input, retrievers, tenant_id=None):
             print(f"[✅ DATABASE UPDATED]: {tool_output}")
             
             # Clear the gate state
-            session_state["pending_tool_call"] = None
+            tenant_state["pending_tool_call"] = None
             
             # Let the AI know it was executed successfully
             final_prompt = f"The user confirmed the action. The system successfully executed the tool. Output: {tool_output}. Inform the user."
-            messages = [get_dynamic_system_prompt(), HumanMessage(content=final_prompt)]
+            messages = [get_dynamic_system_prompt(tenant_id), HumanMessage(content=final_prompt)]
             response_obj = llm.invoke(messages)
             return extract_text(response_obj.content), "Tool Executed Successfully"
             
         else:
             # User said anything other than yes/confirm -> Abort!
             print("\n[❌ USER ABORTED: Action cancelled.]")
-            session_state["pending_tool_call"] = None
+            tenant_state["pending_tool_call"] = None
             return "Action cancelled. I won't perform any changes to your policy.", "User Aborted Action"
 
     # ==========================================
     # 2. STANDARD CHAT / INTENT DETECTION FLOW
     # ==========================================
     
-    # 🌟 NEW: Route the query dynamically!
-    chosen_stream = get_routing_decision(user_input)
+    # 🌟 NEW: Route the query dynamically based on actual folders!
+    available_streams = list(retrievers.keys())
+    chosen_stream = get_routing_decision(user_input, available_streams)
     print(f"\n[AI Router selected knowledge base: {chosen_stream.upper()}]")
     
-    active_retriever = retrievers[chosen_stream]
-    active_llm = llm_with_tools[chosen_stream] # Select the bound LLM
+    active_retriever = retrievers.get(chosen_stream)
+    if not active_retriever:
+        return f"Error: No knowledge base found for {chosen_stream}. Please upload documents first.", ""
+        
+    # Build or fetch tenant-scoped toolkits and bound LLMs for this tenant
+    toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
+    active_llm = llm_with_tools_local.get(chosen_stream, llm)
 
     if tenant_id:
-        relevant_chunks = active_retriever.invoke(user_input)
-        relevant_chunks = [chunk for chunk in relevant_chunks if getattr(chunk.metadata, 'get', lambda *_args, **_kwargs: None)('tenant_id') == tenant_id]
+        # Call retriever and then *strictly* enforce tenant filtering using
+        # several metadata access patterns so we don't accidentally mix tenants.
+        all_chunks = active_retriever.invoke(user_input)
+
+        def chunk_tenant(chunk):
+            # Try dict-style access
+            md = getattr(chunk, 'metadata', None) or {}
+            if isinstance(md, dict):
+                for key in ('tenant_id', 'tenant', 'tenantId'):
+                    if key in md and md[key]:
+                        return str(md[key])
+            # Try attribute-style
+            for attr in ('tenant_id', 'tenant', 'tenantId'):
+                val = getattr(md, attr, None) or getattr(chunk, attr, None)
+                if val:
+                    return str(val)
+            # Fallback: try to parse tenant from source or page_content if it contains a path like '<tenant>/'
+            src = None
+            if hasattr(chunk, 'source') and chunk.source:
+                src = str(chunk.source)
+            elif isinstance(md, dict) and md.get('source'):
+                src = str(md.get('source'))
+            if src and '/' in src:
+                return src.split('/')[0]
+            return None
+
+        # Build list and log tenant ids for debugging
+        filtered = []
+        seen_tenants = set()
+        for c in (all_chunks or []):
+            t = chunk_tenant(c)
+            seen_tenants.add(t)
+            if t == tenant_id:
+                filtered.append(c)
+
+        print(f"[DEBUG] Retrieved tenants from retriever: {seen_tenants}; keeping tenant: {tenant_id}")
+        relevant_chunks = filtered
     else:
         relevant_chunks = active_retriever.invoke(user_input)
     context_for_ai = "\n\n".join([doc.page_content for doc in relevant_chunks])
@@ -402,7 +485,9 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
 3. Because of the security gate, do NOT perform the tool call yet if you are just thinking. Only output the tool call when you are ready to execute.
 """
     
-    messages = [get_dynamic_system_prompt()] + session_history.messages + [HumanMessage(content=turn_payload)]
+    # Retrieve per-tenant session history
+    session_history = get_session_history(tenant_id)
+    messages = [get_dynamic_system_prompt(tenant_id)] + session_history.messages + [HumanMessage(content=turn_payload)]
     
     # Ask the model what it wants to do
     response_obj = active_llm.invoke(messages)
@@ -415,7 +500,7 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
         first_tool_call = response_obj.tool_calls[0]
         
         # Save the tool call details in our state instead of running it!
-        session_state["pending_tool_call"] = first_tool_call
+        tenant_state["pending_tool_call"] = first_tool_call
         
         # Override the response and force the AI to ask the user
         friendly_names = {
@@ -472,25 +557,32 @@ RELEVANCE: <score>
 # ==========================================
 # 7.5 Dynamic Tool Generation
 # ==========================================
-def fetch_dynamic_tasks():
+def fetch_dynamic_tasks(tenant_id: str | None = None):
+    """Fetch dynamic task definitions from the CUSTOMER_SERVICE_PROVIDER endpoint.
+
+    If tenant_id is provided, include it as a filter so each tenant can have
+    its own set of dynamic tasks.
+    """
     print("DEBUG: Entering fetch_dynamic_tasks...")
     rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
-    
     if not rest_url:
         print("ERROR: CUSTOMER_SERVICE_PROVIDER env var is missing!")
         return []
 
     query_url = f"{rest_url}?filename=eq.tasks&datatype=eq.tasks&select=data"
+    if tenant_id:
+        query_url += f"&tenant_id=eq.{tenant_id}"
+
     headers = {
         "apikey": os.getenv("SUPADB_API"),
         "Authorization": f"Bearer {os.getenv('SUPADB_API')}"
     }
-    
+
     try:
         print(f"DEBUG: Requesting {query_url}")
         response = requests.get(query_url, headers=headers, timeout=10)
         print(f"DEBUG: Response status: {response.status_code}")
-        
+
         if response.status_code == 200:
             data = response.json()
             print(f"DEBUG: Data received: {data}")
@@ -500,10 +592,10 @@ def fetch_dynamic_tasks():
                 print("DEBUG: Query returned empty list.")
         else:
             print(f"ERROR: Supabase returned {response.status_code}: {response.text}")
-            
+
     except Exception as e:
         print(f"CRITICAL ERROR in fetch_dynamic_tasks: {str(e)}")
-        
+
     return []
 
 
@@ -579,6 +671,47 @@ def create_dynamic_tool(task_def):
 # ==========================================
 
 print("\n--- Initializing Knowledge Bases ---")
+def build_toolkits_for_tenant(tenant_id: str | None):
+    """Build dynamic toolkits and bound LLMs for a specific tenant.
+
+    Returns a dict { 'policies': [tools], 'administration': [tools] } and
+    a mapping of bound LLMs for each stream.
+    """
+    raw_tasks_data = fetch_dynamic_tasks(tenant_id)
+
+    # FIX: Parse if it came back as a string, otherwise use as dict
+    if isinstance(raw_tasks_data, str):
+        tasks_json = json.loads(raw_tasks_data).get("tasks", [])
+    else:
+        tasks_json = raw_tasks_data.get("tasks", []) if isinstance(raw_tasks_data, dict) else raw_tasks_data
+
+    policies_toolkit = []
+    admin_toolkit = []
+
+    for task in tasks_json:
+        if isinstance(task, dict):
+            langchain_tool = create_dynamic_tool(task)
+            datatype = task.get("datatype", "").upper()
+            if datatype == "POLICIES":
+                policies_toolkit.append(langchain_tool)
+            elif datatype == "ADMINISTRATION":
+                admin_toolkit.append(langchain_tool)
+        else:
+            print(f"Skipping invalid task format: {task}")
+
+    llm_with_tools_local = {
+        "policies": llm.bind_tools(policies_toolkit) if policies_toolkit else llm,
+        "administration": llm.bind_tools(admin_toolkit) if admin_toolkit else llm
+    }
+
+    toolkits_local = {
+        "policies": policies_toolkit,
+        "administration": admin_toolkit
+    }
+
+    return toolkits_local, llm_with_tools_local
+
+
 def get_retrievers_for_tenant(tenant_id: str | None):
     """Create and return retrievers scoped to a specific tenant id.
 
@@ -587,49 +720,57 @@ def get_retrievers_for_tenant(tenant_id: str | None):
     at module import time so new uploads are associated with the correct
     tenant id.
     """
-    return {
-        "policies": preprocess(tenant_id=tenant_id, datatype_label="policies"),
-        "administration": preprocess(tenant_id=tenant_id, datatype_label="administration")
-    }
+    # Discover datatypes from storage folders under the tenant scope.
+    discovered = discover_datatypes(tenant_id)
+    if not discovered:
+        # Fallback to the known defaults so existing routes keep working
+        discovered = ["policies", "administration"]
 
-# Fetch and Parse Dynamic Tools
-raw_tasks_data = fetch_dynamic_tasks()
+    retrievers = {}
+    for dt in discovered:
+        try:
+            retrievers[dt] = preprocess(tenant_id=tenant_id, datatype_label=dt)
+        except Exception as e:
+            print(f"⚠️ Failed to build retriever for {dt}: {e}")
+    return retrievers
 
-# FIX: Parse if it came back as a string, otherwise use as dict
-if isinstance(raw_tasks_data, str):
-    tasks_json = json.loads(raw_tasks_data).get("tasks", [])
-else:
-    # If the DB returned the dict directly
-    tasks_json = raw_tasks_data.get("tasks", []) if isinstance(raw_tasks_data, dict) else []
 
-policies_toolkit = []
-admin_toolkit = []
+def discover_datatypes(tenant_id: str | None):
+    """List first-level subfolders (and inferred folders) under a tenant path."""
+    tenant_scope = tenant_id or ""
+    bucket_name = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
+    list_path = tenant_scope.strip("/") if tenant_scope else ""
 
-for task in tasks_json:
-    # Ensure task is a dictionary before passing to generator
-    if isinstance(task, dict):
-        langchain_tool = create_dynamic_tool(task)
+    try:
+        objects = supabase.storage.from_(bucket_name).list(path=list_path)
+    except Exception as exc:
+        print(f"⚠️ Failed to list storage for discovery: {exc}")
+        return []
+
+    datatypes = set()
+    for obj in objects or []:
+        name = (obj.get("name") or "").strip()
+        if not name:
+            continue
         
-        datatype = task.get("datatype", "").upper()
-        if datatype == "POLICIES":
-            policies_toolkit.append(langchain_tool)
-        elif datatype == "ADMINISTRATION":
-            admin_toolkit.append(langchain_tool)
-    else:
-        print(f"Skipping invalid task format: {task}")
+        # --- FIX: Match the frontend logic to capture folders without slashes ---
+        if name.endswith("/"):
+            part = name.rstrip("/")
+            segment = part.split("/")[-1]
+            datatypes.add(segment.lower())
+        elif "/" in name:
+            segment = name.split("/")[0]
+            datatypes.add(segment.lower())
+        else:
+            # If there is no slash and no file extension, it's a root folder (like 'research')
+            if "." not in name:
+                datatypes.add(name.lower())
+        # ------------------------------------------------------------------------
 
-toolkits = {
-    "policies": policies_toolkit,
-    "administration": admin_toolkit
-}
-
-# Bind tools to specific LLM instances
-llm_with_tools = {
-    "policies": llm.bind_tools(policies_toolkit) if policies_toolkit else llm,
-    "administration": llm.bind_tools(admin_toolkit) if admin_toolkit else llm
-}
-
-# Unify memory
-PROFILE_FILE = "memory/unified_user_profile.json"
-HISTORY_FILE = "memory/unified_chat_history.json"
-session_history = FileChatMessageHistory(HISTORY_FILE)
+    # sanitize and normalize
+    cleaned = []
+    for d in datatypes:
+        safe = re.sub(r'[^a-z0-9_-]', '', d.lower())
+        if safe:
+            cleaned.append(safe)
+    return sorted(cleaned)
