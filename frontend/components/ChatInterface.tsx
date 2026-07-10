@@ -4,7 +4,7 @@ import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Send, Bot, User, Loader2, Sparkles } from 'lucide-react';
 
-export default function ChatInterface() {
+export default function ChatInterface({ tenantId }: { tenantId: string }) {
   const [messages, setMessages] = useState([
     { role: 'bot', content: 'Hello! Welcome to **Allianz Customer Service**. How can I assist you today?' }
   ]);
@@ -23,7 +23,7 @@ export default function ChatInterface() {
       const response = await fetch('http://localhost:8000/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({ message: userMessage, tenant_id: tenantId }),
       });
       const data = await response.json();
       setMessages((prev) => [...prev, { role: 'bot', content: data.response }]);
@@ -35,7 +35,7 @@ export default function ChatInterface() {
   };
 
   return (
-    <div className="flex flex-col h-[600px] w-full max-w-2xl bg-card border border-border rounded-xl shadow-lg overflow-hidden">
+    <div className="flex flex-col h-150 w-full max-w-2xl bg-card border border-border rounded-xl shadow-lg overflow-hidden">
       {/* Header */}
       <div className="px-6 py-4 border-b border-border flex items-center gap-3 bg-card">
         <div className="p-2 bg-primary/10 rounded-full text-primary">

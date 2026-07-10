@@ -1,6 +1,7 @@
 import ChatInterface from '@/components/ChatInterface';
 
 export default function Home() {
+  const tenantId = process.env.NEXT_PUBLIC_TENANT_ID || 'allianz';
   return (
     <main className="min-h-screen bg-background flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-4xl text-center mb-8">
@@ -11,7 +12,7 @@ export default function Home() {
           Your intelligent assistant is ready to help.
         </p>
       </div>
-      <ChatInterface />
+      <ChatInterface tenantId={tenantId} />
     </main>
   );
 }
