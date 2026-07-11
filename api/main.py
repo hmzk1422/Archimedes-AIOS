@@ -25,29 +25,45 @@ class IngestRequest(BaseModel):
     tenant_id: str
     datatype: str | None = "policies"
 
+from fastapi import BackgroundTasks
 
 @app.post("/ingest")
-async def ingest_endpoint(request: IngestRequest):
-    """Trigger preprocessing (LlamaParse and vector insertion) for a tenant and datatype.
-
-    This is useful to run immediately after a user uploads files so that
-    the documents are parsed and available for retrieval without waiting
-    for a chat request to trigger preprocessing.
-    """
+async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks):
+    """Trigger preprocessing in the background."""
     try:
-        preprocess(tenant_id=request.tenant_id, datatype_label=request.datatype)
-        return {"status": "ok", "message": "Ingestion started/completed"}
+        # Pass the heavy lifting to a background thread
+        background_tasks.add_task(
+            preprocess, 
+            tenant_id=request.tenant_id, 
+            datatype_label=request.datatype
+        )
+        # Immediately return success to the client/n8n
+        return {"status": "ok", "message": "Ingestion started in the background"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
+    
 @app.post("/chat")
+async def chat_endpoint(data: dict):
+    user_input = data.get("message")
+    tenant_id = data.get("tenant_id")
+    
+    # 1. Get your retrievers (you already have this logic)
+    retrievers = { "policies": preprocess(tenant_id, "policies") } 
+    
+    # 2. Call your Brain
+    response_text, context = ask_agent(user_input, retrievers, tenant_id)
+    
+    # 3. Return to the Traffic Controller
+    return {"response": response_text}
+
+"""
 async def chat_endpoint(request: ChatRequest):
     # Create retrievers scoped to the requesting tenant so that newly uploaded
     # files are associated with the correct user id and datatype folder.
     retrievers = get_retrievers_for_tenant(request.tenant_id)
     response, _ = ask_agent(request.message, retrievers, tenant_id=request.tenant_id)
     return {"response": response}
-
+"""
 
 @app.get("/storage-list")
 async def storage_list(tenant_id: str | None = None):
