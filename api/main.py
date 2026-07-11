@@ -46,14 +46,12 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
 async def chat_endpoint(data: dict):
     user_input = data.get("message")
     tenant_id = data.get("tenant_id")
+    customer_id = data.get("customer_id")
     
-    # 1. Get your retrievers (you already have this logic)
     retrievers = { "policies": preprocess(tenant_id, "policies") } 
     
-    # 2. Call your Brain
-    response_text, context = ask_agent(user_input, retrievers, tenant_id)
+    response_text, context = ask_agent(user_input, retrievers, tenant_id, customer_id)
     
-    # 3. Return to the Traffic Controller
     return {"response": response_text}
 
 """
