@@ -73,6 +73,38 @@ def check_if_md_exists(base_name, datatype_label, tenant_id=None):
         print(f"⚠️ Error checking database for {base_name}: {e}")
     return False
 
+def check_if_embedded(base_name, datatype_label, tenant_id=None):
+    """Checks the VECTOR table (documents), not the raw text table."""
+    metadata_filter = {"source": base_name, "datatype": datatype_label}
+    if tenant_id:
+        metadata_filter["tenant_id"] = tenant_id
+    query_url = f"{SUPABASE_URL}/rest/v1/documents?metadata=cs.{urllib.parse.quote(json.dumps(metadata_filter))}&select=id&limit=1"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        response = requests.get(query_url, headers=headers)
+        if response.status_code == 200:
+            return len(response.json()) > 0
+    except Exception as e:
+        print(f"⚠️ Error checking embeddings for {base_name}: {e}")
+    return False
+
+def fetch_existing_md(base_name, datatype_label, tenant_id=None):
+    """Pulls previously-parsed MD text back out so it can be re-embedded without re-running LlamaParse."""
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    query_parts = [f"filename=eq.{base_name}", f"datatype=eq.{datatype_label}"]
+    if tenant_id:
+        query_parts.append(f"tenant_id=eq.{tenant_id}")
+    query_url = f"{rest_url}?{'&'.join(query_parts)}&select=data"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        response = requests.get(query_url, headers=headers)
+        if response.status_code == 200:
+            rows = response.json()
+            if rows:
+                return rows[0].get("data")
+    except Exception as e:
+        print(f"⚠️ Error fetching existing MD for {base_name}: {e}")
+    return None
 
 def preprocess(tenant_id=None, datatype_label="policies"):
     print(f"\n--- Processing PDFs from Supabase Storage for {datatype_label.upper()} ---")
@@ -124,8 +156,25 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             base_name = os.path.splitext(filename_only)[0]
             object_path = relative_path
 
-            if check_if_md_exists(base_name, datatype_label, tenant_id=tenant_scope or None):
-                print(f"✅ {base_name} already exists in Supabase. Skipping LlamaParse.")
+            md_already_parsed = check_if_md_exists(base_name, datatype_label, tenant_id=tenant_scope or None)
+            embeddings_already_exist = check_if_embedded(base_name, datatype_label, tenant_id=tenant_scope or None)
+
+            if md_already_parsed and embeddings_already_exist:
+                print(f"✅ {base_name} already parsed and embedded for this tenant. Skipping.")
+                continue
+
+            if md_already_parsed and not embeddings_already_exist:
+                print(f"♻️ {base_name} MD exists but not embedded for this tenant — re-embedding without LlamaParse.")
+                md_content = fetch_existing_md(base_name, datatype_label, tenant_id=tenant_scope or None)
+                if not md_content:
+                    print(f"⚠️ Could not load existing MD for {base_name}, skipping.")
+                    continue
+                splits = markdown_splitter.split_text(md_content)
+                for split in splits:
+                    split.metadata["source"] = base_name
+                    split.metadata["datatype"] = datatype_label
+                    split.metadata["tenant_id"] = tenant_scope
+                md_header_splits.extend(splits)
                 continue
 
             try:
@@ -239,16 +288,16 @@ def preprocess(tenant_id=None, datatype_label="policies"):
 # ==========================================
 os.makedirs("memory", exist_ok=True)
 
-def _profile_path_for(tenant_id: str | None):
-    key = tenant_id or "global"
+def _profile_path_for(tenant_id: str | None, customer_id: str | None = None):
+    key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
     return f"memory/user_profile_{key}.json"
 
-def _history_path_for(tenant_id: str | None):
-    key = tenant_id or "global"
+def _history_path_for(tenant_id: str | None, customer_id: str | None = None):
+    key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
     return f"memory/chat_history_{key}.json"
 
-def load_user_profile(tenant_id: str | None = None):
-    PROFILE_FILE = _profile_path_for(tenant_id)
+def load_user_profile(tenant_id: str | None = None, customer_id: str | None = None):
+    PROFILE_FILE = _profile_path_for(tenant_id, customer_id)
     if os.path.exists(PROFILE_FILE):
         with open(PROFILE_FILE, "r") as f:
             try:
@@ -257,8 +306,8 @@ def load_user_profile(tenant_id: str | None = None):
                 return {}
     return {}
 
-def save_user_profile(profile_data, tenant_id: str | None = None):
-    PROFILE_FILE = _profile_path_for(tenant_id)
+def save_user_profile(profile_data, tenant_id: str | None = None, customer_id: str | None = None):
+    PROFILE_FILE = _profile_path_for(tenant_id, customer_id)
     with open(PROFILE_FILE, "w") as f:
         json.dump(profile_data, f, indent=4)
 
@@ -286,8 +335,8 @@ def extract_and_update_facts(user_input, current_profile, tenant_id: str | None 
 # Cache of FileChatMessageHistory per tenant to avoid reopening files repeatedly
 _session_history_cache: dict = {}
 
-def get_session_history(tenant_id: str | None = None):
-    path = _history_path_for(tenant_id)
+def get_session_history(tenant_id: str | None = None, customer_id: str | None = None):
+    path = _history_path_for(tenant_id, customer_id)
     if path not in _session_history_cache:
         _session_history_cache[path] = FileChatMessageHistory(path)
     return _session_history_cache[path]
@@ -332,8 +381,8 @@ def get_routing_decision(user_input, available_streams):
     # Safe fallback to the first available datatype
     return available_streams[0]
 
-def get_dynamic_system_prompt(tenant_id: str | None = None):
-    profile = load_user_profile(tenant_id)
+def get_dynamic_system_prompt(tenant_id: str | None = None, customer_id: str | None = None):
+    profile = load_user_profile(tenant_id, customer_id)
     profile_text = json.dumps(profile, indent=2) if profile else "No user data collected yet."
     
     return SystemMessage(content=f"""You are a helpful, meticulous policy verification clerk for an insurance agency offering multiple plans.
@@ -360,11 +409,11 @@ CRITICAL COMPLIANCE RULES:
 session_state = {
     "pending_tool_call": None,  # Stores the tool data when waiting for confirmation
 }
-def ask_agent(user_input, retrievers, tenant_id=None):
+def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     global session_state
     
-    # Use per-tenant session state
-    tenant_key = tenant_id or 'global'
+    # Use per-tenant + per-customer session state
+    tenant_key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
     if isinstance(session_state, dict):
         # already migrated
         pass
@@ -404,7 +453,7 @@ def ask_agent(user_input, retrievers, tenant_id=None):
             
             # Let the AI know it was executed successfully
             final_prompt = f"The user confirmed the action. The system successfully executed the tool. Output: {tool_output}. Inform the user."
-            messages = [get_dynamic_system_prompt(tenant_id), HumanMessage(content=final_prompt)]
+            messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
             response_obj = llm.invoke(messages)
             return extract_text(response_obj.content), "Tool Executed Successfully"
             
@@ -486,8 +535,8 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
 """
     
     # Retrieve per-tenant session history
-    session_history = get_session_history(tenant_id)
-    messages = [get_dynamic_system_prompt(tenant_id)] + session_history.messages + [HumanMessage(content=turn_payload)]
+    session_history = get_session_history(tenant_id, customer_id)
+    messages = [get_dynamic_system_prompt(tenant_id, customer_id)] + session_history.messages + [HumanMessage(content=turn_payload)]
     
     # Ask the model what it wants to do
     response_obj = active_llm.invoke(messages)
