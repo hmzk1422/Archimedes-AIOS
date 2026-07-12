@@ -81,50 +81,52 @@ export default function UploadPage() {
   const [linkedFiles, setLinkedFiles] = useState<any[]>([])
   const [fetchingLinkedFiles, setFetchingLinkedFiles] = useState(false)
 
-  // Fetch true datatypes (folders) from Supabase Storage
-  // Fetch true datatypes (folders) from Supabase Storage
+  // Fetch datatypes from the customer-service-provider table
   const refreshDatatypes = useCallback(async (uid: string, silent = false) => {
-    if (!silent) setStatus({ kind: 'info', message: 'Refreshing datatypes from storage…' })
+    if (!silent) setStatus({ kind: 'info', message: 'Refreshing datatypes from database…' })
 
     try {
       const supabase = createClient()
-      const bucket = process.env.NEXT_PUBLIC_SUPABASE_BUCKET || 'customer-service-provider'
 
-      const { data, error } = await supabase.storage.from(bucket).list(uid, {
-        limit: 100,
-        offset: 0,
-        sortBy: { column: 'name', order: 'asc' },
-      })
+      // 1. Query the database table, explicitly hiding the 'tasks' datatype
+      const { data, error } = await supabase
+        .from('customer-service-provider')
+        .select('datatype')
+        .eq('tenant_id', uid)
+        .neq('datatype', 'tasks') // <-- ADD THIS LINE
 
       if (error) throw error
 
       if (data) {
-        // Folders in Supabase Storage typically return without an ID
-        const fetchedFolders = data
-          .filter((item) => !item.id || item.id === null)
-          .map((item) => item.name)
+        // 2. Extract unique datatypes using a Set, filter out empties, and sort alphabetically
+        const fetchedFolders = Array.from(
+          new Set(data.map((item) => item.datatype).filter(Boolean))
+        ).sort()
 
         if (fetchedFolders.length > 0) {
-          setDatatypes(fetchedFolders)
-          
-          // FIX: Use a functional state update to remove the direct 'datatype' dependency
-          setDatatype((currentDatatype) => 
-            fetchedFolders.includes(currentDatatype) ? currentDatatype : fetchedFolders[0]
-          )
+          // 3. Update state securely to prevent the "disappearing datatype" bug
+          setDatatype((currentDatatype) => {
+            const active = currentDatatype || fetchedFolders[0]
+            
+            // Merge fetched folders with the currently active one
+            setDatatypes(
+              Array.from(new Set([...fetchedFolders, active])).filter(Boolean).sort()
+            )
+            
+            return active
+          })
 
-          if (!silent) setStatus({ kind: 'success', message: 'Datatypes synced with storage.' })
+          if (!silent) setStatus({ kind: 'success', message: 'Datatypes synced with database.' })
         } else if (!silent) {
-          setStatus({ kind: 'info', message: 'No existing datatypes found in storage.' })
+          setStatus({ kind: 'info', message: 'No existing datatypes found in database.' })
         }
       }
     } catch (error) {
       if (!silent) {
-        setStatus({ kind: 'error', message: 'Failed to fetch datatypes from storage.' })
+        setStatus({ kind: 'error', message: 'Failed to fetch datatypes from database.' })
       }
     }
-     // FIX: Dependency array is now completely empty, making the function reference stable!
   }, [])
-
   // Fetch actual files inside the currently selected datatype (static uploads)
   const refreshFiles = useCallback(async (uid: string, currentDatatype: string) => {
     setFetchingFiles(true)
@@ -620,17 +622,6 @@ export default function UploadPage() {
                       >
                         {linkSubmitting ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />}
                         {linkSubmitting ? 'Sending…' : 'Add link'}
-                      </Button>
-                    )}
-                    {mode === 'file' && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="lg"
-                        onClick={() => userId && refreshDatatypes(userId)}
-                      >
-                        <RefreshCw className="size-4" />
-                        Refresh from storage
                       </Button>
                     )}
                   </div>
