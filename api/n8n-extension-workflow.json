@@ -1,0 +1,365 @@
+{
+  "name": "Customer Service Gateway - Multi Platform",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gateway/:platform/:token",
+        "options": {
+          "responseData": "allEntries"
+        }
+      },
+      "id": "25d807e8-ddd4-4e54-aafd-819ef5a3ee74",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        128,
+        -176
+      ],
+      "webhookId": "a663bd1a-ad07-46c4-835f-12794a86f214"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const item = $input.item.json;\nconst params = item.params || {};\nconst body = item.body || item;\n\nconst platform = String(params.platform || body.platform || 'unknown').trim().toLowerCase();\nconst token = String(params.token || body.token || '').trim();\nlet message = body.message || body;\nlet customer_id = body.customer_id || '';\n\nif (platform === 'telegram') {\n  message = body.message || body.edited_message || body;\n  customer_id = customer_id || message?.chat?.id || message?.from?.id || '';\n}\n\nif (platform === 'whatsapp') {\n  const value = body.entry?.[0]?.changes?.[0]?.value;\n  const waMessage = value?.messages?.[0];\n  message = waMessage || body;\n  customer_id = customer_id || waMessage?.from || value?.contacts?.[0]?.wa_id || '';\n}\n\nif (platform === 'zendesk') {\n  message = body;\n  customer_id = customer_id || body.ticket_id || body.ticket?.id || body.requester?.id || '';\n}\n\nreturn {\n  platform,\n  token,\n  message,\n  customer_id: String(customer_id || ''),\n};"
+      },
+      "id": "5dfe0175-2c28-4fd5-9bb9-2ffd5366bdb0",
+      "name": "Normalizer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8001/n8n/process",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "ee6cb022-23b0-4be1-9a75-47a13b53dc9f",
+      "name": "Python API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        576,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "38e5bf51-1ff4-4828-a801-d0efc5165ff3",
+                    "leftValue": "={{ $json.platform.trim() }}",
+                    "rightValue": "telegram",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "9e15f2ec-63d6-4fb9-8f10-71af621a4a47",
+                    "leftValue": "={{ $json.platform.trim() }}",
+                    "rightValue": "whatsapp",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "df770077-c00d-41ff-91ac-2199a0b24156",
+                    "leftValue": "={{ $json.platform.trim() }}",
+                    "rightValue": "zendesk",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9b14d77e-436f-4e33-a458-98ff41ca05c0",
+      "name": "Switch Platform",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        800,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $json.token }}/sendMessage",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $json.customer_id }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.reply_text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "25a469ac-953f-4c13-b13e-367c5ddaa153",
+      "name": "Telegram Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1104,
+        -352
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $json.outbound.whatsapp_phone_id }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.outbound.whatsapp_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"messaging_product\": \"whatsapp\", \"to\": $json.customer_id, \"type\": \"text\", \"text\": { \"body\": $json.reply_text } } }}",
+        "options": {}
+      },
+      "id": "6dc3a10c-a4e4-4212-a2b0-9a6dc95ab2ac",
+      "name": "WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1104,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const item = $input.item.json;\nconst outbound = item.outbound || {};\nconst email = outbound.zendesk_email;\nconst token = outbound.zendesk_token;\n\nif (!email || !token) {\n  throw new Error('Missing zendesk_email or zendesk_token in Python API outbound config.');\n}\n\nreturn {\n  ...item,\n  zendesk_auth_header: `Basic ${Buffer.from(`${email}/token:${token}`).toString('base64')}`,\n};"
+      },
+      "id": "d828ef92-8dc5-4880-82a8-d527fd72b25e",
+      "name": "Prepare Zendesk Auth",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://{{ $json.outbound.zendesk_subdomain }}.zendesk.com/api/v2/tickets/{{ $json.customer_id }}.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.zendesk_auth_header }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"ticket\": { \"comment\": { \"body\": $json.reply_text, \"public\": true } } } }}",
+        "options": {}
+      },
+      "id": "1cb3fc67-36a4-4c77-a907-88e12c56c933",
+      "name": "Zendesk Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1328,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "console.log('Gateway dispatch result:', $input.all().map((item) => item.json));\nreturn $input.all();"
+      },
+      "id": "aae8b1ac-f8cf-4775-aa08-03c9b0d677f0",
+      "name": "Dispatch Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        -176
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizer": {
+      "main": [
+        [
+          {
+            "node": "Python API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python API": {
+      "main": [
+        [
+          {
+            "node": "Switch Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Platform": {
+      "main": [
+        [
+          {
+            "node": "Telegram Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Zendesk Auth",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Reply": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Reply": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Zendesk Auth": {
+      "main": [
+        [
+          {
+            "node": "Zendesk Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Zendesk Reply": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3bc736265ae44c1d8e7f0c8f80d0d9d481415ee9c42364d3edf2efa2e9450dbc"
+  }
+}

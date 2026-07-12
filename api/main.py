@@ -19,6 +19,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     tenant_id: str | None = None
+    customer_id: str | None = None
 
 
 class IngestRequest(BaseModel):
@@ -33,35 +34,26 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
     try:
         # Pass the heavy lifting to a background thread
         background_tasks.add_task(
-            preprocess, 
-            tenant_id=request.tenant_id, 
+            preprocess,
+            tenant_id=request.tenant_id,
             datatype_label=request.datatype
         )
         # Immediately return success to the client/n8n
         return {"status": "ok", "message": "Ingestion started in the background"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-    
+
 @app.post("/chat")
 async def chat_endpoint(data: dict):
     user_input = data.get("message")
     tenant_id = data.get("tenant_id")
     customer_id = data.get("customer_id")
-    
-    retrievers = { "policies": preprocess(tenant_id, "policies") } 
-    
+
+    retrievers = get_retrievers_for_tenant(tenant_id)
     response_text, context = ask_agent(user_input, retrievers, tenant_id, customer_id)
-    
+
     return {"response": response_text}
 
-"""
-async def chat_endpoint(request: ChatRequest):
-    # Create retrievers scoped to the requesting tenant so that newly uploaded
-    # files are associated with the correct user id and datatype folder.
-    retrievers = get_retrievers_for_tenant(request.tenant_id)
-    response, _ = ask_agent(request.message, retrievers, tenant_id=request.tenant_id)
-    return {"response": response}
-"""
 
 @app.get("/storage-list")
 async def storage_list(tenant_id: str | None = None):

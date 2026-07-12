@@ -381,11 +381,7 @@ def get_routing_decision(user_input, available_streams):
     # Safe fallback to the first available datatype
     return available_streams[0]
 
-def get_dynamic_system_prompt(tenant_id: str | None = None, customer_id: str | None = None):
-    profile = load_user_profile(tenant_id, customer_id)
-    profile_text = json.dumps(profile, indent=2) if profile else "No user data collected yet."
-    
-    return SystemMessage(content=f"""You are a helpful, meticulous policy verification clerk for an insurance agency offering multiple plans.
+DEFAULT_SYSTEM_MESSAGE_TEMPLATE = """You are a helpful, meticulous policy verification clerk for an insurance agency offering multiple plans.
 
 KNOWN USER FACTS (LONG-TERM MEMORY):
 {profile_text}
@@ -397,10 +393,61 @@ INSURANCE QUOTING MANDATE (ANTI-REFUSAL OVERRIDE):
 
 CRITICAL COMPLIANCE RULES:
 1. Base your answer strictly on the provided POLICY CONTEXT and the KNOWN USER FACTS.
-2. When answering financial questions, you MUST perform an explicit mathematical comparison. 
+2. When answering financial questions, you MUST perform an explicit mathematical comparison.
 3. When checking ages, explicitly write out whether the target age falls inside the boundaries.
 4. If the context lacks the required numbers to perform math, say: 'I need to check with a human.'
-""")
+"""
+
+
+def _parse_json_object(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def get_tenant_system_message_template(tenant_id: str | None = None):
+    if not tenant_id:
+        return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    query_url = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{tenant_id}&select=extension&limit=1"
+
+    try:
+        response = requests.get(query_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            print(f"WARNING: Failed to load tenant system message: {response.status_code} {response.text}")
+            return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+
+        rows = response.json()
+        if not rows:
+            return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+
+        extension = _parse_json_object(rows[0].get("extension"))
+        agent_settings = _parse_json_object(extension.get("agent-settings"))
+        system_message = agent_settings.get("system_message")
+
+        if isinstance(system_message, str) and system_message.strip():
+            return system_message
+    except Exception as exc:
+        print(f"WARNING: Failed to load tenant system message: {exc}")
+
+    return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+
+
+def get_dynamic_system_prompt(tenant_id: str | None = None, customer_id: str | None = None):
+    profile = load_user_profile(tenant_id, customer_id)
+    profile_text = json.dumps(profile, indent=2) if profile else "No user data collected yet."
+    template = get_tenant_system_message_template(tenant_id)
+    return SystemMessage(content=template.replace("{profile_text}", profile_text))
 
 # ==========================================
 # 6. The Ask Agent Function
@@ -437,7 +484,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             
             # Map and execute the function across per-tenant dynamic toolkits
             toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
-            all_available_tools = toolkits_local.get("policies", []) + toolkits_local.get("administration", [])
+            all_available_tools = [tool for tools in toolkits_local.values() for tool in tools]
             tool_map = {tool.name: tool for tool in all_available_tools}
             
             if tool_name in tool_map:
@@ -721,41 +768,39 @@ def create_dynamic_tool(task_def):
 
 print("\n--- Initializing Knowledge Bases ---")
 def build_toolkits_for_tenant(tenant_id: str | None):
-    """Build dynamic toolkits and bound LLMs for a specific tenant.
-
-    Returns a dict { 'policies': [tools], 'administration': [tools] } and
-    a mapping of bound LLMs for each stream.
-    """
+    """Build dynamic toolkits and bound LLMs for every task datatype."""
     raw_tasks_data = fetch_dynamic_tasks(tenant_id)
 
-    # FIX: Parse if it came back as a string, otherwise use as dict
     if isinstance(raw_tasks_data, str):
-        tasks_json = json.loads(raw_tasks_data).get("tasks", [])
+        tasks_json = _parse_json_object(raw_tasks_data).get("tasks", [])
+    elif isinstance(raw_tasks_data, dict):
+        tasks_json = raw_tasks_data.get("tasks", [])
     else:
-        tasks_json = raw_tasks_data.get("tasks", []) if isinstance(raw_tasks_data, dict) else raw_tasks_data
+        tasks_json = raw_tasks_data
 
-    policies_toolkit = []
-    admin_toolkit = []
+    if not isinstance(tasks_json, list):
+        tasks_json = []
+
+    toolkits_local = {}
 
     for task in tasks_json:
-        if isinstance(task, dict):
-            langchain_tool = create_dynamic_tool(task)
-            datatype = task.get("datatype", "").upper()
-            if datatype == "POLICIES":
-                policies_toolkit.append(langchain_tool)
-            elif datatype == "ADMINISTRATION":
-                admin_toolkit.append(langchain_tool)
-        else:
+        if not isinstance(task, dict):
             print(f"Skipping invalid task format: {task}")
+            continue
+
+        datatype = re.sub(r'[^a-z0-9_-]', '', str(task.get("datatype") or "general").lower()) or "general"
+
+        try:
+            langchain_tool = create_dynamic_tool(task)
+        except Exception as exc:
+            print(f"Skipping invalid task definition for datatype {datatype}: {exc}")
+            continue
+
+        toolkits_local.setdefault(datatype, []).append(langchain_tool)
 
     llm_with_tools_local = {
-        "policies": llm.bind_tools(policies_toolkit) if policies_toolkit else llm,
-        "administration": llm.bind_tools(admin_toolkit) if admin_toolkit else llm
-    }
-
-    toolkits_local = {
-        "policies": policies_toolkit,
-        "administration": admin_toolkit
+        datatype: llm.bind_tools(tools) if tools else llm
+        for datatype, tools in toolkits_local.items()
     }
 
     return toolkits_local, llm_with_tools_local
@@ -769,11 +814,7 @@ def get_retrievers_for_tenant(tenant_id: str | None):
     at module import time so new uploads are associated with the correct
     tenant id.
     """
-    # Discover datatypes from storage folders under the tenant scope.
     discovered = discover_datatypes(tenant_id)
-    if not discovered:
-        # Fallback to the known defaults so existing routes keep working
-        discovered = ["policies", "administration"]
 
     retrievers = {}
     for dt in discovered:
@@ -785,41 +826,58 @@ def get_retrievers_for_tenant(tenant_id: str | None):
 
 
 def discover_datatypes(tenant_id: str | None):
-    """List first-level subfolders (and inferred folders) under a tenant path."""
+    """Discover tenant datatypes from storage folders and indexed database rows."""
     tenant_scope = tenant_id or ""
     bucket_name = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
-    list_path = tenant_scope.strip("/") if tenant_scope else ""
+    datatypes = set()
 
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    if rest_url:
+        query_url = f"{rest_url}?select=datatype&datatype=neq.tasks"
+        if tenant_id:
+            query_url += f"&tenant_id=eq.{tenant_id}"
+
+        headers = {
+            "apikey": os.getenv("SUPADB_API"),
+            "Authorization": f"Bearer {os.getenv('SUPADB_API')}",
+        }
+
+        try:
+            response = requests.get(query_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                for row in response.json() or []:
+                    datatype = row.get("datatype")
+                    if datatype:
+                        datatypes.add(str(datatype).lower())
+            else:
+                print(f"WARNING: Failed to discover table datatypes: {response.status_code} {response.text}")
+        except Exception as exc:
+            print(f"WARNING: Failed to discover table datatypes: {exc}")
+
+    list_path = tenant_scope.strip("/") if tenant_scope else ""
     try:
         objects = supabase.storage.from_(bucket_name).list(path=list_path)
     except Exception as exc:
-        print(f"⚠️ Failed to list storage for discovery: {exc}")
-        return []
+        print(f"WARNING: Failed to list storage for discovery: {exc}")
+        objects = []
 
-    datatypes = set()
     for obj in objects or []:
         name = (obj.get("name") or "").strip()
         if not name:
             continue
-        
-        # --- FIX: Match the frontend logic to capture folders without slashes ---
+
         if name.endswith("/"):
-            part = name.rstrip("/")
-            segment = part.split("/")[-1]
+            segment = name.rstrip("/").split("/")[-1]
             datatypes.add(segment.lower())
         elif "/" in name:
             segment = name.split("/")[0]
             datatypes.add(segment.lower())
-        else:
-            # If there is no slash and no file extension, it's a root folder (like 'research')
-            if "." not in name:
-                datatypes.add(name.lower())
-        # ------------------------------------------------------------------------
+        elif "." not in name:
+            datatypes.add(name.lower())
 
-    # sanitize and normalize
     cleaned = []
     for d in datatypes:
         safe = re.sub(r'[^a-z0-9_-]', '', d.lower())
-        if safe:
+        if safe and safe != "tasks":
             cleaned.append(safe)
     return sorted(cleaned)

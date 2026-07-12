@@ -59,8 +59,8 @@ export default function UploadPage() {
   // Upload & UI State
   const [file, setFile] = useState<File | null>(null)
   const [dragging, setDragging] = useState(false)
-  const [datatypes, setDatatypes] = useState<string[]>(['policies', 'administration'])
-  const [datatype, setDatatype] = useState('policies')
+  const [datatypes, setDatatypes] = useState<string[]>([])
+  const [datatype, setDatatype] = useState('')
   const [newDatatype, setNewDatatype] = useState('')
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState<Status>({ kind: 'idle', message: '' })
@@ -83,50 +83,48 @@ export default function UploadPage() {
 
   // Fetch datatypes from the customer-service-provider table
   const refreshDatatypes = useCallback(async (uid: string, silent = false) => {
-    if (!silent) setStatus({ kind: 'info', message: 'Refreshing datatypes from database…' })
+  if (!silent) setStatus({ kind: 'info', message: 'Refreshing datatypes from database…' })
 
-    try {
-      const supabase = createClient()
+  try {
+    const supabase = createClient()
 
-      // 1. Query the database table, explicitly hiding the 'tasks' datatype
-      const { data, error } = await supabase
-        .from('customer-service-provider')
-        .select('datatype')
-        .eq('tenant_id', uid)
-        .neq('datatype', 'tasks') // <-- ADD THIS LINE
+    const { data, error } = await supabase
+      .from('customer-service-provider')
+      .select('datatype')
+      .eq('tenant_id', uid)
+      .neq('datatype', 'tasks')
 
-      if (error) throw error
+    if (error) throw error
 
-      if (data) {
-        // 2. Extract unique datatypes using a Set, filter out empties, and sort alphabetically
-        const fetchedFolders = Array.from(
-          new Set(data.map((item) => item.datatype).filter(Boolean))
-        ).sort()
+    if (data) {
+      const fetchedFolders = Array.from(
+        new Set(data.map((item) => item.datatype).filter(Boolean))
+      ).sort()
 
-        if (fetchedFolders.length > 0) {
-          // 3. Update state securely to prevent the "disappearing datatype" bug
-          setDatatype((currentDatatype) => {
-            const active = currentDatatype || fetchedFolders[0]
-            
-            // Merge fetched folders with the currently active one
-            setDatatypes(
-              Array.from(new Set([...fetchedFolders, active])).filter(Boolean).sort()
-            )
-            
-            return active
-          })
+      // CRITICAL: Always update the available datatypes list with what came from the DB
+      setDatatypes(fetchedFolders)
 
-          if (!silent) setStatus({ kind: 'success', message: 'Datatypes synced with database.' })
-        } else if (!silent) {
+      if (fetchedFolders.length > 0) {
+        setDatatype((currentDatatype) => {
+          // If the current datatype is still valid, keep it; otherwise use the first available one
+          return fetchedFolders.includes(currentDatatype) ? currentDatatype : fetchedFolders[0]
+        })
+
+        if (!silent) setStatus({ kind: 'success', message: 'Datatypes synced with database.' })
+      } else {
+        // CRITICAL: Explicitly clear the active datatype if the account is completely empty
+        setDatatype('')
+        if (!silent) {
           setStatus({ kind: 'info', message: 'No existing datatypes found in database.' })
         }
       }
-    } catch (error) {
-      if (!silent) {
-        setStatus({ kind: 'error', message: 'Failed to fetch datatypes from database.' })
-      }
     }
-  }, [])
+  } catch (error) {
+    if (!silent) {
+      setStatus({ kind: 'error', message: 'Failed to fetch datatypes from database.' })
+    }
+  }
+}, [])
   // Fetch actual files inside the currently selected datatype (static uploads)
   const refreshFiles = useCallback(async (uid: string, currentDatatype: string) => {
     setFetchingFiles(true)
