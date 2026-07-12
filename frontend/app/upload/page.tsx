@@ -64,6 +64,9 @@ export default function UploadPage() {
   const [newDatatype, setNewDatatype] = useState('')
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState<Status>({ kind: 'idle', message: '' })
+  const [customInstruction, setCustomInstruction] = useState('')
+  const [savingInstruction, setSavingInstruction] = useState(false)
+  const [instructionStatus, setInstructionStatus] = useState<Status>({ kind: 'idle', message: '' })
   const inputRef = useRef<HTMLInputElement>(null)
 
   // File Management State
@@ -191,14 +194,18 @@ export default function UploadPage() {
       setUserId(user.id)
 
       // 1. Fetch exact tenant_name matching the dashboard requirements
-      const { data: profile } = await supabase
+      const { data: profile, error: profileError } = await supabase
         .from('profiles')
-        .select('tenant_name')
+        .select('tenant_name, custom_instruction')
         .eq('id', user.id)
-        .single()
+        .maybeSingle()
 
-      if (profile?.tenant_name) {
+      if (!profileError && profile?.tenant_name) {
         setTenantName(profile.tenant_name)
+      }
+
+      if (!profileError && profile?.custom_instruction !== null) {
+        setCustomInstruction(profile?.custom_instruction ?? '')
       }
 
       // 2. Reflect what's truly inside the supabase storage on load
@@ -239,6 +246,34 @@ export default function UploadPage() {
     if (!datatypes.includes(normalized)) setDatatypes((prev) => [...prev, normalized])
     setDatatype(normalized)
     setNewDatatype('')
+  }
+
+  async function handleSaveCustomInstruction() {
+    if (!userId) {
+      setInstructionStatus({ kind: 'error', message: 'Please sign in before saving instructions.' })
+      return
+    }
+
+    setSavingInstruction(true)
+    setInstructionStatus({ kind: 'info', message: 'Saving custom instructions…' })
+
+    try {
+      const supabase = createClient()
+      const { error } = await supabase
+        .from('profiles')
+        .update({ custom_instruction: customInstruction })
+        .eq('id', userId)
+      if (error) throw error
+
+      setInstructionStatus({ kind: 'success', message: 'Custom instructions saved for your account.' })
+    } catch (error) {
+      setInstructionStatus({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'Failed to save custom instructions',
+      })
+    } finally {
+      setSavingInstruction(false)
+    }
   }
 
   async function handleUpload(e: FormEvent) {
@@ -431,9 +466,10 @@ export default function UploadPage() {
           </div>
         ) : (
           <div className="mt-8 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-            <Card>
-              <CardContent className="pt-6">
-                <form onSubmit={mode === 'file' ? handleUpload : handleAddLink} className="space-y-6">
+            <div className="space-y-6">
+              <Card>
+                <CardContent className="pt-6">
+                  <form onSubmit={mode === 'file' ? handleUpload : handleAddLink} className="space-y-6">
                   {/* NEW: mode toggle */}
                   <div className="inline-flex rounded-lg border border-border bg-secondary/30 p-1">
                     <button
@@ -641,9 +677,46 @@ export default function UploadPage() {
                       <span className="break-all">{activeStatus.message}</span>
                     </div>
                   )}
-                </form>
-              </CardContent>
-            </Card>
+                  </form>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="space-y-0">
+                  <CardTitle>Custom instructions</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    These instructions are stored in your profile and are used by the agent when answering questions.
+                  </p>
+                  <textarea
+                    value={customInstruction}
+                    onChange={(e) => setCustomInstruction(e.target.value)}
+                    placeholder="Tell the agent how to respond for your business, tone, or edge cases..."
+                    className="min-h-35 w-full rounded-lg border border-input bg-card px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                  />
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-xs text-muted-foreground">Saved only to your account profile.</p>
+                    <Button type="button" size="sm" onClick={handleSaveCustomInstruction} disabled={savingInstruction || !userId}>
+                      {savingInstruction ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+                      {savingInstruction ? 'Saving…' : 'Save instructions'}
+                    </Button>
+                  </div>
+                  {instructionStatus.message && (
+                    <div
+                      className={cn(
+                        'rounded-lg border p-3 text-sm',
+                        instructionStatus.kind === 'success' && 'border-primary/30 bg-primary/10 text-foreground',
+                        instructionStatus.kind === 'error' && 'border-destructive/40 bg-destructive/10 text-destructive',
+                        instructionStatus.kind === 'info' && 'border-border bg-secondary/40 text-muted-foreground',
+                      )}
+                    >
+                      {instructionStatus.message}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
 
             {/* Sidebar */}
             <div className="space-y-6">
@@ -691,7 +764,7 @@ export default function UploadPage() {
                     <p className="text-xs text-muted-foreground">No files uploaded to this datatype yet.</p>
                   )}
 
-                  <div className="max-h-[300px] space-y-2 overflow-y-auto pr-2">
+                  <div className="max-h-75 space-y-2 overflow-y-auto pr-2">
                     {currentFiles.map((f) => (
                       <div
                         key={f.id}
@@ -736,7 +809,7 @@ export default function UploadPage() {
                     <p className="text-xs text-muted-foreground">No links added to this datatype yet.</p>
                   )}
 
-                  <div className="max-h-[300px] space-y-2 overflow-y-auto pr-2">
+                  <div className="max-h-75 space-y-2 overflow-y-auto pr-2">
                     {linkedFiles.map((row) => (
                       <div
                         key={row.id}
