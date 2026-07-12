@@ -20,6 +20,13 @@ Businesses today are drowning in high-volume, low-complexity support tickets tha
 - Scalable Efficiency: Built for rapid deployment in high-volume enterprise environments
 
 # Technical Guideline
+## Installs
+**Requirements:** ngrok, docker, n8n, nodejs, python
+```
+docker run -it --rm -p 5678:5678 -v "C:\Users\Himaska\.n8n:/home/node/.n8n" --name n8n docker.n8n.io/n8nio/n8n
+```
+
+## Running the Platform
 Run the following commands.
 **Frontend**
 Go to frontend folder.
@@ -41,4 +48,6 @@ There are 2 files. `company-api` is the simulated third-party side communicating
 ```
 python -m uvicorn main:app --reload
 python -m company-api
+python -m extension
+ngrok http 5678
 ```
