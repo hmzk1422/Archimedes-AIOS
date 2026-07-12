@@ -381,21 +381,9 @@ def get_routing_decision(user_input, available_streams):
     # Safe fallback to the first available datatype
     return available_streams[0]
 
-DEFAULT_SYSTEM_MESSAGE_TEMPLATE = """You are a helpful, meticulous policy verification clerk for an insurance agency offering multiple plans.
-
+DEFAULT_SYSTEM_MESSAGE_TEMPLATE = """
 KNOWN USER FACTS (LONG-TERM MEMORY):
 {profile_text}
-(Use these facts automatically if they are relevant to the user's questions, like age calculations).
-
-INSURANCE QUOTING MANDATE (ANTI-REFUSAL OVERRIDE):
-- Users will frequently ask general questions, test different financial amounts, or pivot between scenarios.
-- Do NOT refuse to answer, and NEVER accuse the user of fraud.
-
-CRITICAL COMPLIANCE RULES:
-1. Base your answer strictly on the provided POLICY CONTEXT and the KNOWN USER FACTS.
-2. When answering financial questions, you MUST perform an explicit mathematical comparison.
-3. When checking ages, explicitly write out whether the target age falls inside the boundaries.
-4. If the context lacks the required numbers to perform math, say: 'I need to check with a human.'
 """
 
 
@@ -419,7 +407,8 @@ def get_tenant_system_message_template(tenant_id: str | None = None):
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
-    query_url = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{tenant_id}&select=extension&limit=1"
+    
+    query_url = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{tenant_id}&select=custom_instruction&limit=1"
 
     try:
         response = requests.get(query_url, headers=headers, timeout=10)
@@ -431,12 +420,17 @@ def get_tenant_system_message_template(tenant_id: str | None = None):
         if not rows:
             return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
 
-        extension = _parse_json_object(rows[0].get("extension"))
-        agent_settings = _parse_json_object(extension.get("agent-settings"))
-        system_message = agent_settings.get("system_message")
+        custom_instruction = rows[0].get("custom_instruction")
 
-        if isinstance(system_message, str) and system_message.strip():
-            return system_message
+        # 👇 THE FIX: Merge the custom instruction with the default template
+        if isinstance(custom_instruction, str) and custom_instruction.strip():
+            combined_template = f"""{DEFAULT_SYSTEM_MESSAGE_TEMPLATE}
+
+TENANT CUSTOM INSTRUCTIONS:
+{custom_instruction.strip()}
+"""
+            return combined_template
+            
     except Exception as exc:
         print(f"WARNING: Failed to load tenant system message: {exc}")
 
