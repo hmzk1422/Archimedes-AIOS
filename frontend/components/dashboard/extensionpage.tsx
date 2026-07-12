@@ -1,171 +1,365 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
-import { Save, Loader2, Settings, AlertCircle } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { AlertCircle, Building2, Loader2, MessageCircle, Save, Send, Settings } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
-import { DashboardNav } from '@/components/dashboard/dashboard-nav'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
-// Types
-type AgentTask = {
-  name: string
-  datatype: string
-  description: string
-  endpoint: string
-  method: string
-  required_args: string[]
+type PlatformKey = 'telegram' | 'whatsapp' | 'zendesk'
+
+type PlatformConfig = {
+  enabled: boolean
+  config: Record<string, string>
 }
 
-type Extension = {
-  name: string
-  version: string
-  enabled: boolean
-  args: string
+type ExtensionConfig = {
+  'connection-extension': {
+    enabled: boolean
+    platforms: Record<PlatformKey, PlatformConfig>
+  }
 }
 
 type Status = { kind: 'idle' | 'success' | 'error' | 'info'; message: string }
 
-const TABLE_NAME = 'customer-service-provider'
+type PlatformField = {
+  key: string
+  label: string
+  placeholder: string
+  type?: string
+}
+
+type PlatformDefinition = {
+  key: PlatformKey
+  name: string
+  description: string
+  icon: typeof Send
+  fields: PlatformField[]
+}
+
+const PLATFORM_DEFINITIONS: PlatformDefinition[] = [
+  {
+    key: 'telegram',
+    name: 'Telegram',
+    description: 'Connect a Telegram bot through the n8n gateway.',
+    icon: Send,
+    fields: [
+      {
+        key: 'telegram_token',
+        label: 'Bot API Token',
+        placeholder: '1234567890:AA...',
+        type: 'password',
+      },
+    ],
+  },
+  {
+    key: 'whatsapp',
+    name: 'WhatsApp',
+    description: 'Use the WhatsApp Cloud API token and phone number id.',
+    icon: MessageCircle,
+    fields: [
+      {
+        key: 'whatsapp_token',
+        label: 'Access Token',
+        placeholder: 'EAA...',
+        type: 'password',
+      },
+      {
+        key: 'whatsapp_phone_id',
+        label: 'Phone Number ID',
+        placeholder: '123456789012345',
+      },
+    ],
+  },
+  {
+    key: 'zendesk',
+    name: 'Zendesk',
+    description: 'Route Zendesk ticket messages through the same agent gateway.',
+    icon: Building2,
+    fields: [
+      {
+        key: 'zendesk_email',
+        label: 'Zendesk Email',
+        placeholder: 'agent@example.com',
+        type: 'email',
+      },
+      {
+        key: 'zendesk_token',
+        label: 'API Token',
+        placeholder: 'Zendesk API token',
+        type: 'password',
+      },
+      {
+        key: 'zendesk_subdomain',
+        label: 'Subdomain',
+        placeholder: 'your-company',
+      },
+    ],
+  },
+]
+
+const DEFAULT_EXTENSION_CONFIG: ExtensionConfig = {
+  'connection-extension': {
+    enabled: false,
+    platforms: {
+      telegram: {
+        enabled: false,
+        config: {
+          telegram_token: '',
+        },
+      },
+      whatsapp: {
+        enabled: false,
+        config: {
+          whatsapp_token: '',
+          whatsapp_phone_id: '',
+        },
+      },
+      zendesk: {
+        enabled: false,
+        config: {
+          zendesk_email: '',
+          zendesk_token: '',
+          zendesk_subdomain: '',
+        },
+      },
+    },
+  },
+}
+
+function cloneDefaultConfig(): ExtensionConfig {
+  return JSON.parse(JSON.stringify(DEFAULT_EXTENSION_CONFIG)) as ExtensionConfig
+}
+
+function normalizeExtensionConfig(value: unknown): ExtensionConfig {
+  let parsed = value
+
+  if (typeof parsed === 'string' && parsed.trim()) {
+    try {
+      parsed = JSON.parse(parsed)
+    } catch {
+      parsed = {}
+    }
+  }
+
+  const next = cloneDefaultConfig()
+  const source = parsed && typeof parsed === 'object' ? parsed as Partial<ExtensionConfig> : {}
+  const connection = source['connection-extension']
+  const sourcePlatforms = (connection?.platforms ?? {}) as Partial<Record<PlatformKey, PlatformConfig>>
+
+  PLATFORM_DEFINITIONS.forEach((platform) => {
+    const incoming = sourcePlatforms[platform.key]
+    next['connection-extension'].platforms[platform.key] = {
+      enabled: Boolean(incoming?.enabled),
+      config: {
+        ...next['connection-extension'].platforms[platform.key].config,
+        ...(incoming?.config ?? {}),
+      },
+    }
+  })
+
+  next['connection-extension'].enabled =
+    Boolean(connection?.enabled) ||
+    PLATFORM_DEFINITIONS.some(({ key }) => next['connection-extension'].platforms[key].enabled)
+
+  return next
+}
 
 export default function ExtensionPage() {
-  const router = useRouter()
-  
-  // State
-  const [tasks, setTasks] = useState<AgentTask[]>([])
-  const [extensions, setExtensions] = useState<Extension[]>([])
-  const [rowId, setRowId] = useState<string | null>(null)
+  const [extensionConfig, setExtensionConfig] = useState<ExtensionConfig>(cloneDefaultConfig)
   const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(true)
   const [isDirty, setIsDirty] = useState(false)
   const [status, setStatus] = useState<Status>({ kind: 'idle', message: '' })
 
-  // Fetch data
-  const fetchData = useCallback(async () => {
-    const supabase = createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
+  const enabledCount = useMemo(
+    () => PLATFORM_DEFINITIONS.filter(({ key }) => extensionConfig['connection-extension'].platforms[key].enabled).length,
+    [extensionConfig]
+  )
 
-    const { data, error } = await supabase
-      .from(TABLE_NAME)
-      .select('id, data')
-      .eq('datatype', 'tasks')
-      .eq('filename', 'tasks')
-      .eq('tenant_id', user.id)
-      .maybeSingle()
+  useEffect(() => {
+    let cancelled = false
 
-    if (data) {
-      setRowId(data.id)
-      const parsed = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
-      setTasks(Array.isArray(parsed?.tasks) ? parsed.tasks : [])
-      setExtensions(Array.isArray(parsed?.extensions) ? parsed.extensions : [])
+    async function loadExtensionSettings() {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+
+      if (!user) {
+        if (!cancelled) setChecking(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('extension')
+        .eq('id', user.id)
+        .maybeSingle()
+
+      if (cancelled) return
+
+      if (error) {
+        setStatus({ kind: 'error', message: 'Failed to load extension settings.' })
+      } else {
+        setExtensionConfig(normalizeExtensionConfig(data?.extension))
+        setIsDirty(false)
+      }
+
+      setChecking(false)
+    }
+
+    void loadExtensionSettings()
+
+    return () => {
+      cancelled = true
     }
   }, [])
 
-  useEffect(() => {
-    fetchData()
-  }, [fetchData])
+  function updatePlatformEnabled(platform: PlatformKey, enabled: boolean) {
+    setExtensionConfig((current) => {
+      const next = structuredClone(current)
+      next['connection-extension'].platforms[platform].enabled = enabled
+      next['connection-extension'].enabled = PLATFORM_DEFINITIONS.some(
+        ({ key }) => next['connection-extension'].platforms[key].enabled
+      )
+      return next
+    })
+    setIsDirty(true)
+  }
 
-  // Save changes
+  function updatePlatformField(platform: PlatformKey, field: string, value: string) {
+    setExtensionConfig((current) => {
+      const next = structuredClone(current)
+      next['connection-extension'].platforms[platform].config[field] = value
+      return next
+    })
+    setIsDirty(true)
+  }
+
   async function handleSave() {
     setLoading(true)
+    setStatus({ kind: 'info', message: 'Saving extension settings...' })
     const supabase = createClient()
     const { data: { user } } = await supabase.auth.getUser()
-    
+
+    if (!user) {
+      setStatus({ kind: 'error', message: 'You must be logged in to save extension settings.' })
+      setLoading(false)
+      return
+    }
+
     try {
-      const payload = { tasks, extensions }
-      if (rowId) {
-        await supabase.from(TABLE_NAME).update({ data: payload }).eq('id', rowId)
-      } else {
-        await supabase.from(TABLE_NAME).insert([{ 
-            datatype: 'tasks', 
-            filename: 'tasks', 
-            data: payload, 
-            tenant_id: user?.id 
-        }])
-      }
+      const normalized = normalizeExtensionConfig(extensionConfig)
+      const { error } = await supabase
+        .from('profiles')
+        .update({ extension: normalized })
+        .eq('id', user.id)
+
+      if (error) throw error
+
+      setExtensionConfig(normalized)
       setIsDirty(false)
-      setStatus({ kind: 'success', message: 'Configuration saved successfully.' })
+      setStatus({ kind: 'success', message: 'Extension settings saved to your profile.' })
     } catch (err) {
-      setStatus({ kind: 'error', message: 'Failed to save configuration.' })
+      console.error(err)
+      setStatus({ kind: 'error', message: 'Failed to save extension settings.' })
     } finally {
       setLoading(false)
     }
   }
 
-  const updateExtension = (index: number, field: keyof Extension, value: any) => {
-    const newExts = [...extensions]
-    newExts[index] = { ...newExts[index], [field]: value }
-    setExtensions(newExts)
-    setIsDirty(true)
-  }
-
   return (
-    <div className="min-h-screen bg-background">  
-      <main className="mx-auto max-w-3xl px-4 py-8">
-        <div className="flex justify-between items-center mb-8">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Agent Extensions</h1>
-            <p className="text-muted-foreground">Toggle and configure your active agents.</p>
-          </div>
-          <Button onClick={handleSave} disabled={loading || !isDirty}>
-            {loading ? <Loader2 className="animate-spin size-4" /> : <Save className="size-4" />}
-            <span className="ml-2">Save Changes</span>
-          </Button>
+    <section className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Connections</p>
+          <h2 className="mt-1 font-display text-2xl font-bold tracking-tight">Agent Extensions</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Turn on external channels and store their gateway credentials in your profile.
+          </p>
         </div>
+        <Button onClick={handleSave} disabled={loading || checking || !isDirty}>
+          {loading ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+          <span>Save Changes</span>
+        </Button>
+      </div>
 
-        {status.message && (
-          <div className={cn("mb-6 p-4 rounded-lg border flex items-center gap-2", 
-            status.kind === 'success' ? "bg-green-50 text-green-800 border-green-200" : "bg-red-50 text-red-800 border-red-200")}>
-            <AlertCircle className="size-4" />
-            <p className="text-sm">{status.message}</p>
-          </div>
-        )}
+      {status.message && (
+        <div className={cn(
+          'rounded-lg border p-3 text-sm flex items-center gap-2',
+          status.kind === 'success' && 'border-primary/20 bg-primary/10 text-primary',
+          status.kind === 'error' && 'border-destructive/20 bg-destructive/10 text-destructive',
+          status.kind === 'info' && 'border-border bg-muted text-muted-foreground'
+        )}>
+          <AlertCircle className="size-4" />
+          <p>{status.message}</p>
+        </div>
+      )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Settings className="size-5" /> Enabled Extensions
-            </CardTitle>
-            <CardDescription>Manage your extension list and provide required arguments.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {extensions.map((ext, i) => (
-              <div key={i} className="p-4 border rounded-xl bg-card shadow-sm space-y-4">
-                <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-4">
-                    <Switch 
-                      checked={ext.enabled} 
-                      onCheckedChange={(val) => updateExtension(i, 'enabled', val)} 
-                    />
-                    <div>
-                      <p className="font-semibold">{ext.name}</p>
-                      <p className="text-xs text-muted-foreground">Version {ext.version}</p>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="size-5" /> Connection Extension
+          </CardTitle>
+          <CardDescription>
+            {checking ? 'Loading profile settings...' : `${enabledCount} platform${enabledCount === 1 ? '' : 's'} enabled.`}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {checking ? (
+            <div className="flex items-center justify-center py-10 text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" /> Loading extensions
+            </div>
+          ) : (
+            PLATFORM_DEFINITIONS.map((platform) => {
+              const Icon = platform.icon
+              const state = extensionConfig['connection-extension'].platforms[platform.key]
+
+              return (
+                <div key={platform.key} className="rounded-lg border bg-card p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <div className="mt-0.5 rounded-md border bg-background p-2 text-muted-foreground">
+                        <Icon className="size-4" />
+                      </div>
+                      <div>
+                        <p className="font-semibold">{platform.name}</p>
+                        <p className="text-sm text-muted-foreground">{platform.description}</p>
+                      </div>
                     </div>
-                  </div>
-                </div>
-                
-                {ext.enabled && (
-                  <div className="pl-12 pt-2 animate-in slide-in-from-top-2">
-                    <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      Configuration Arguments
-                    </label>
-                    <Input 
-                      className="mt-1"
-                      placeholder="e.g. timeout=30, mode=fast" 
-                      value={ext.args} 
-                      onChange={(e) => updateExtension(i, 'args', e.target.value)} 
+                    <Switch
+                      aria-label={`Enable ${platform.name}`}
+                      checked={state.enabled}
+                      onCheckedChange={(enabled) => updatePlatformEnabled(platform.key, enabled)}
                     />
                   </div>
-                )}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      </main>
-    </div>
+
+                  {state.enabled && (
+                    <div className="mt-4 grid gap-4 border-t pt-4 sm:grid-cols-2">
+                      {platform.fields.map((field) => (
+                        <div key={field.key} className="space-y-2">
+                          <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                            {field.label}
+                          </label>
+                          <Input
+                            type={field.type ?? 'text'}
+                            value={state.config[field.key] ?? ''}
+                            onChange={(event) => updatePlatformField(platform.key, field.key, event.target.value)}
+                            placeholder={field.placeholder}
+                            autoComplete="off"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })
+          )}
+        </CardContent>
+      </Card>
+    </section>
   )
 }
