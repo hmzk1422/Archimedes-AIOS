@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Building2, Loader2, MessageCircle, Save, Send, Settings } from 'lucide-react'
+import { AlertCircle, Building2, ChevronDown, ChevronUp, Loader2, MessageCircle, Save, Send, Settings } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -161,9 +161,8 @@ function normalizeExtensionConfig(value: unknown): ExtensionConfig {
     }
   })
 
-  next['connection-extension'].enabled =
-    Boolean(connection?.enabled) ||
-    PLATFORM_DEFINITIONS.some(({ key }) => next['connection-extension'].platforms[key].enabled)
+  // Trust the database state for the master switch, do not auto-calculate it
+  next['connection-extension'].enabled = Boolean(connection?.enabled)
 
   return next
 }
@@ -174,6 +173,9 @@ export default function ExtensionPage() {
   const [checking, setChecking] = useState(true)
   const [isDirty, setIsDirty] = useState(false)
   const [status, setStatus] = useState<Status>({ kind: 'idle', message: '' })
+  
+  // NEW: State to manage the folded/expanded UI
+  const [isExpanded, setIsExpanded] = useState(true)
 
   const enabledCount = useMemo(
     () => PLATFORM_DEFINITIONS.filter(({ key }) => extensionConfig['connection-extension'].platforms[key].enabled).length,
@@ -217,13 +219,25 @@ export default function ExtensionPage() {
     }
   }, [])
 
+  function updateMasterEnabled(enabled: boolean) {
+    setExtensionConfig((current) => {
+      const next = structuredClone(current)
+      next['connection-extension'].enabled = enabled
+      return next
+    })
+    setIsDirty(true)
+  }
+
   function updatePlatformEnabled(platform: PlatformKey, enabled: boolean) {
     setExtensionConfig((current) => {
       const next = structuredClone(current)
       next['connection-extension'].platforms[platform].enabled = enabled
-      next['connection-extension'].enabled = PLATFORM_DEFINITIONS.some(
-        ({ key }) => next['connection-extension'].platforms[key].enabled
-      )
+      
+      // Auto-enable the master switch if a platform is turned on
+      if (enabled) {
+        next['connection-extension'].enabled = true
+      }
+      
       return next
     })
     setIsDirty(true)
@@ -299,66 +313,97 @@ export default function ExtensionPage() {
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Settings className="size-5" /> Connection Extension
-          </CardTitle>
-          <CardDescription>
-            {checking ? 'Loading profile settings...' : `${enabledCount} platform${enabledCount === 1 ? '' : 's'} enabled.`}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {checking ? (
-            <div className="flex items-center justify-center py-10 text-muted-foreground">
-              <Loader2 className="mr-2 size-4 animate-spin" /> Loading extensions
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+          {/* Made the title area clickable to toggle the fold */}
+          <div 
+            className="space-y-1.5 cursor-pointer flex-1 transition-opacity hover:opacity-80"
+            onClick={() => setIsExpanded(!isExpanded)}
+          >
+            <CardTitle className="flex items-center gap-2 select-none">
+              <Settings className="size-5" /> 
+              Connection Extension
+              {isExpanded ? (
+                <ChevronUp className="size-4 text-muted-foreground ml-1" />
+              ) : (
+                <ChevronDown className="size-4 text-muted-foreground ml-1" />
+              )}
+            </CardTitle>
+            <CardDescription className="select-none">
+              {checking ? 'Loading profile settings...' : `${enabledCount} platform${enabledCount === 1 ? '' : 's'} configured.`}
+            </CardDescription>
+          </div>
+          
+          {/* The Master Switch remains independent and functional */}
+          {!checking && (
+            <div className="flex items-center gap-3 rounded-lg border bg-secondary/30 px-3 py-2 ml-4">
+              <span className="text-sm font-medium text-foreground">Master Gateway</span>
+              <Switch
+                aria-label="Toggle Master Connection Gateway"
+                checked={extensionConfig['connection-extension'].enabled}
+                onCheckedChange={updateMasterEnabled}
+              />
             </div>
-          ) : (
-            PLATFORM_DEFINITIONS.map((platform) => {
-              const Icon = platform.icon
-              const state = extensionConfig['connection-extension'].platforms[platform.key]
-
-              return (
-                <div key={platform.key} className="rounded-lg border bg-card p-4 shadow-sm">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex min-w-0 items-start gap-3">
-                      <div className="mt-0.5 rounded-md border bg-background p-2 text-muted-foreground">
-                        <Icon className="size-4" />
-                      </div>
-                      <div>
-                        <p className="font-semibold">{platform.name}</p>
-                        <p className="text-sm text-muted-foreground">{platform.description}</p>
-                      </div>
-                    </div>
-                    <Switch
-                      aria-label={`Enable ${platform.name}`}
-                      checked={state.enabled}
-                      onCheckedChange={(enabled) => updatePlatformEnabled(platform.key, enabled)}
-                    />
-                  </div>
-
-                  {state.enabled && (
-                    <div className="mt-4 grid gap-4 border-t pt-4 sm:grid-cols-2">
-                      {platform.fields.map((field) => (
-                        <div key={field.key} className="space-y-2">
-                          <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                            {field.label}
-                          </label>
-                          <Input
-                            type={field.type ?? 'text'}
-                            value={state.config[field.key] ?? ''}
-                            onChange={(event) => updatePlatformField(platform.key, field.key, event.target.value)}
-                            placeholder={field.placeholder}
-                            autoComplete="off"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            })
           )}
-        </CardContent>
+        </CardHeader>
+        
+        {/* The CardContent only renders if isExpanded is true */}
+        {isExpanded && (
+          <CardContent className={cn(
+            "space-y-4 transition-all duration-300", 
+            !extensionConfig['connection-extension'].enabled && "opacity-60 pointer-events-none"
+          )}>
+            {checking ? (
+              <div className="flex items-center justify-center py-10 text-muted-foreground">
+                <Loader2 className="mr-2 size-4 animate-spin" /> Loading extensions
+              </div>
+            ) : (
+              PLATFORM_DEFINITIONS.map((platform) => {
+                const Icon = platform.icon
+                const state = extensionConfig['connection-extension'].platforms[platform.key]
+
+                return (
+                  <div key={platform.key} className="rounded-lg border bg-card p-4 shadow-sm">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex min-w-0 items-start gap-3">
+                        <div className="mt-0.5 rounded-md border bg-background p-2 text-muted-foreground">
+                          <Icon className="size-4" />
+                        </div>
+                        <div>
+                          <p className="font-semibold">{platform.name}</p>
+                          <p className="text-sm text-muted-foreground">{platform.description}</p>
+                        </div>
+                      </div>
+                      <Switch
+                        aria-label={`Enable ${platform.name}`}
+                        checked={state.enabled}
+                        onCheckedChange={(enabled) => updatePlatformEnabled(platform.key, enabled)}
+                      />
+                    </div>
+
+                    {state.enabled && (
+                      <div className="mt-4 grid gap-4 border-t pt-4 sm:grid-cols-2">
+                        {platform.fields.map((field) => (
+                          <div key={field.key} className="space-y-2">
+                            <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                              {field.label}
+                            </label>
+                            <Input
+                              type={field.type ?? 'text'}
+                              value={state.config[field.key] ?? ''}
+                              onChange={(event) => updatePlatformField(platform.key, field.key, event.target.value)}
+                              placeholder={field.placeholder}
+                              autoComplete="off"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })
+            )}
+          </CardContent>
+        )}
       </Card>
     </section>
   )

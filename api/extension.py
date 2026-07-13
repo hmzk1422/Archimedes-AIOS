@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+﻿from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 import httpx
@@ -192,11 +192,13 @@ async def get_tenant_by_token(platform: str, target_token: str) -> Optional[Tena
 
             for row in rows:
                 ext = row.get("extension") or {}
+                print(f"Checking row {row.get('id')} - Extension data: {ext}") # <--- Add this
                 if not isinstance(ext, dict):
                     continue
 
                 connection_extension = ext.get("connection-extension") or {}
                 if not connection_extension.get("enabled"):
+                    print("Skipped: connection-extension not enabled") # <--- Add this
                     continue
 
                 platforms_config = connection_extension.get("platforms") or {}

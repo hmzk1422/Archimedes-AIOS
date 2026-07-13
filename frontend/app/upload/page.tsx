@@ -181,6 +181,7 @@ export default function UploadPage() {
   }, [])
 
   // Load user & tenant context on mount
+  // Load user & tenant context on mount
   useEffect(() => {
     async function loadUser() {
       const supabase = createClient()
@@ -200,12 +201,19 @@ export default function UploadPage() {
         .eq('id', user.id)
         .maybeSingle()
 
-      if (!profileError && profile?.tenant_name) {
-        setTenantName(profile.tenant_name)
+      // Log any silent database/RLS errors to the browser console
+      if (profileError) {
+        console.error('Error fetching profile:', profileError.message)
       }
 
-      if (!profileError && profile?.custom_instruction !== null) {
-        setCustomInstruction(profile?.custom_instruction ?? '')
+      // Safely apply the data if the profile exists
+      if (profile) {
+        if (profile.tenant_name) {
+          setTenantName(profile.tenant_name)
+        }
+        if (profile.custom_instruction !== null && profile.custom_instruction !== undefined) {
+          setCustomInstruction(profile.custom_instruction)
+        }
       }
 
       // 2. Reflect what's truly inside the supabase storage on load
@@ -259,11 +267,20 @@ export default function UploadPage() {
 
     try {
       const supabase = createClient()
-      const { error } = await supabase
+      
+      // Append .select() to verify a row was actually found and modified
+      const { data, error } = await supabase
         .from('profiles')
         .update({ custom_instruction: customInstruction })
         .eq('id', userId)
+        .select() 
+
       if (error) throw error
+
+      // CRITICAL CHECK: If data is empty, the update silently failed
+      if (!data || data.length === 0) {
+        throw new Error("Profile not found. You may need to create a profile row for this user first, or check your database RLS policies.")
+      }
 
       setInstructionStatus({ kind: 'success', message: 'Custom instructions saved for your account.' })
     } catch (error) {
