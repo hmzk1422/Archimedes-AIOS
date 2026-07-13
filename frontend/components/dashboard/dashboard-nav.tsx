@@ -22,7 +22,7 @@ const navLinks = [
   { label: 'Knowledge Base', href: '/upload', icon: Database },
   { label: 'Actions', href: '/actions', icon: Wrench },
   { label: 'Metrics', href: '/metrics', icon: BarChart3 },
-  { label: 'Settings', href: '/settings', icon: Settings },
+  { label: 'Agent', href: '/agent', icon: Settings },
 ]
 
 export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string }) {

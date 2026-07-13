@@ -43,6 +43,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart'
+import { PageBackground } from '@/components/page-background'
 
 // ──────────────────────────────────────────────
 // Types
@@ -976,7 +977,8 @@ telemetry.set_context({
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="relative min-h-screen overflow-hidden bg-background">
+      <PageBackground />
       <DashboardNav tenantName={tenantName} />
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:py-10">
 

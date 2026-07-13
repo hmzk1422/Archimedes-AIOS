@@ -4,7 +4,7 @@ import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from gemini import ask_agent, get_retrievers_for_tenant, preprocess
+from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file
 from telemetry_sdk import get_telemetry, reset_telemetry
 from supabase import create_client, Client
 from hitl import fetch_hitl_config, evaluate_hitl, HITLDecision, detect_sentiment, fetch_task_names
@@ -33,6 +33,12 @@ class IngestRequest(BaseModel):
 
 from fastapi import BackgroundTasks
 
+class DeleteKnowledgeRequest(BaseModel):
+    tenant_id: str
+    datatype: str
+    file_name: str
+
+
 @app.post("/ingest")
 async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks):
     """Trigger preprocessing in the background."""
@@ -58,6 +64,16 @@ async def chat_endpoint(data: dict):
     response_text, context = ask_agent(user_input, retrievers, tenant_id, customer_id)
 
     return {"response": response_text}
+
+
+@app.post("/knowledge/delete")
+async def delete_knowledge_endpoint(request: DeleteKnowledgeRequest):
+    """Delete the indexed knowledge rows for a file that was removed from storage."""
+    try:
+        result = delete_knowledge_file(request.tenant_id, request.datatype, request.file_name)
+        return {"status": "ok", **result}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 @app.get("/storage-list")
