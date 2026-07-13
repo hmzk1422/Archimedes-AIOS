@@ -12,6 +12,7 @@ import {
   Bell,
   Menu,
   X,
+  BarChart3,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -20,6 +21,7 @@ const navLinks = [
   { label: 'Overview', href: '/dashboard', icon: LayoutDashboard },
   { label: 'Knowledge Base', href: '/upload', icon: Database },
   { label: 'Actions', href: '/actions', icon: Wrench },
+  { label: 'Metrics', href: '/metrics', icon: BarChart3 },
   { label: 'Settings', href: '/settings', icon: Settings },
 ]
 

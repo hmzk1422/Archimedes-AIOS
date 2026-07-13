@@ -341,6 +341,9 @@ def get_session_history(tenant_id: str | None = None, customer_id: str | None = 
         _session_history_cache[path] = FileChatMessageHistory(path)
     return _session_history_cache[path]
 
+from hitl import evaluate_hitl, detect_sentiment, HITLDecision
+from hitl_notifier import notify_hitl_triggered
+
 # ==========================================
 # 5. Guardrailed System Prompt & Information Routing
 # ==========================================
@@ -583,24 +586,74 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
     response_obj = active_llm.invoke(messages)
 
     # ==========================================
-    # 3. INTERCEPT THE TRIGGER-HAPPY AI
+    # 3. HITL INTERCEPTION (Human-In-The-Loop)
     # ==========================================
     if response_obj.tool_calls:
-        # The AI *wants* to run a tool. We catch it here and freeze it!
         first_tool_call = response_obj.tool_calls[0]
+        tool_name = first_tool_call["name"]
+        tool_args = first_tool_call["args"]
         
-        # Save the tool call details in our state instead of running it!
-        tenant_state["pending_tool_call"] = first_tool_call
+        # Run HITL evaluation for this tool call
+        hitl_decision = evaluate_hitl(
+            task_name=tool_name,
+            tool_args=tool_args,
+            user_input=user_input,
+            tenant_id=tenant_id,
+        )
         
-        # Override the response and force the AI to ask the user
-        friendly_names = {
-            "process_top_up": "process a premium top-up",
-            "get_claim_status": "retrieve your claim status details",
-            "register_claim_details": "register your claim details in our system"
-        }
-        action_name = friendly_names.get(first_tool_call["name"], first_tool_call["name"])
-        
-        return f"I am ready to {action_name}. To ensure security, do you explicitly want me to proceed with this action? Please type 'Yes' to confirm.", context_for_ai
+        if hitl_decision.requires_hitl:
+            # HITL triggered — save the tool call and ask for human approval
+            tenant_state["pending_tool_call"] = first_tool_call
+            
+            friendly_names = {
+                "process_top_up": "process a premium top-up",
+                "get_claim_status": "retrieve your claim status details",
+                "register_claim_details": "register your claim details in our system"
+            }
+            action_name = friendly_names.get(tool_name, tool_name)
+            
+            # Build a context-aware HITL message explaining why approval is needed
+            trigger_type = hitl_decision.trigger_type  # "action", "response", "context"
+            trigger_reason = hitl_decision.reason or "Security policy requires human approval."
+            
+            hitl_message = (
+                f"✅ I'm ready to **{action_name}**.\n\n"
+                f"⚠️ **Human approval needed** ({trigger_type}-based trigger): {trigger_reason}\n\n"
+                f"Would you like to proceed? Reply 'Yes' to confirm or 'No' to cancel."
+            )
+            
+            print(f"\n[HITL TRIGGERED] {trigger_type}: {trigger_reason}")
+            
+            # Send email notification (async, best-effort)
+            notify_hitl_triggered(
+                tenant_id=tenant_id,
+                decision=hitl_decision,
+                tool_name=tool_name,
+                tool_args=tool_args,
+            )
+            
+            return hitl_message, context_for_ai
+        else:
+            # HITL not required — execute the tool directly
+            print(f"\n[HITL SKIPPED] Tool '{tool_name}' passed all HITL checks. Executing directly.")
+            
+            # Build toolkits and execute
+            toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
+            all_available_tools = [tool for tools in toolkits_local.values() for tool in tools]
+            tool_map = {tool.name: tool for tool in all_available_tools}
+            
+            if tool_name in tool_map:
+                tool_output = tool_map[tool_name].invoke(tool_args)
+            else:
+                tool_output = f"Error: Tool '{tool_name}' not found."
+            
+            print(f"[✅ TOOL EXECUTED]: {tool_output}")
+            
+            # Let the AI inform the user about the result
+            final_prompt = f"The system successfully executed the tool '{tool_name}'. Output: {tool_output}. Inform the user about the result."
+            messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
+            response_obj = llm.invoke(messages)
+            return extract_text(response_obj.content), hitl_decision.to_dict()
 
     # If it's just a general question with no tool intent, reply normally
     raw_response = extract_text(response_obj.content)
