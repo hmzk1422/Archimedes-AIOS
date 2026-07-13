@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import ExtensionPage from '@/components/dashboard/extensionpage'
 import HITLSettings from '@/components/hitl-settings'
+import { PageBackground } from '@/components/page-background'
 
 // 1. Define the exact structure based on your 6 parameters
 type AgentTask = {
@@ -222,7 +223,8 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="relative min-h-screen overflow-hidden bg-background">
+      <PageBackground />
       <DashboardNav tenantName={tenantName} />
       <main className="mx-auto max-w-5xl px-4 py-8">
 

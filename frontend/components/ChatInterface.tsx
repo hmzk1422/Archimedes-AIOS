@@ -35,7 +35,9 @@ export default function ChatInterface({ tenantId }: { tenantId: string }) {
   };
 
   return (
-    <div className="flex flex-col h-150 w-full max-w-2xl bg-card border border-border rounded-xl shadow-lg overflow-hidden">
+    // FIX: Replaced `h-150` and `max-w-2xl` with `h-full w-full`. Removed card borders/shadows for an edge-to-edge fit.
+    <div className="flex flex-col h-full w-full bg-background overflow-hidden">
+      
       {/* Header */}
       <div className="px-6 py-4 border-b border-border flex items-center gap-3 bg-card">
         <div className="p-2 bg-primary/10 rounded-full text-primary">
@@ -46,6 +48,7 @@ export default function ChatInterface({ tenantId }: { tenantId: string }) {
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-background">
+        {/* Optional: If messages stretch too wide on desktop, you can wrap this mapping in a <div className="max-w-4xl mx-auto w-full"> */}
         {messages.map((m, i) => (
           <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
             <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${m.role === 'bot' ? 'bg-primary/20 text-primary' : 'bg-muted text-muted-foreground'}`}>
@@ -73,6 +76,7 @@ export default function ChatInterface({ tenantId }: { tenantId: string }) {
 
       {/* Input */}
       <div className="p-4 border-t border-border bg-card">
+        {/* Optional: Add mx-auto max-w-4xl here too if you center the messages above */}
         <div className="flex items-center gap-2 bg-input/50 p-2 rounded-lg focus-within:ring-2 ring-ring transition-all">
           <input 
             className="flex-1 bg-transparent px-3 py-1 outline-none text-foreground placeholder:text-muted-foreground" 

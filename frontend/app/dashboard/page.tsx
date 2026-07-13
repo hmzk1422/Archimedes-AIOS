@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { buttonVariants } from '@/components/ui/button'
 import LogoutButton from '@/components/LogoutButton'
 import ChatInterface from '@/components/ChatInterface'
+import { PageBackground } from '@/components/page-background'
 
 const activity = [
   { time: '2m ago', text: 'Resolved refund request', meta: 'billing · email' },
@@ -38,7 +39,8 @@ export default async function DashboardPage() {
   const tenantName = profile?.tenant_name ?? 'there'
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="relative min-h-screen overflow-hidden bg-background">
+      <PageBackground />
       <DashboardNav tenantName={tenantName} />
 
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:py-10">
@@ -125,12 +127,6 @@ export default async function DashboardPage() {
               </ul>
             </CardContent>
           </Card>
-
-          {/* Integrated Chat Interface */}
-          <div className="mt-10">
-            <ChatInterface tenantId={user.id} />
-          </div>
-          
         </div>
       </main>
     </div>

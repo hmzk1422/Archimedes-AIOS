@@ -26,6 +26,7 @@ import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { PageBackground } from '@/components/page-background'
 
 type Status = { kind: 'idle' | 'success' | 'error' | 'info'; message: string }
 
@@ -365,6 +366,24 @@ export default function UploadPage() {
         )
       }
 
+      try {
+        const cleanupResponse = await fetch('http://localhost:8000/knowledge/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenant_id: userId,
+            datatype,
+            file_name: fileName,
+          }),
+        })
+
+        if (!cleanupResponse.ok) {
+          console.error('Knowledge cleanup failed', await cleanupResponse.text())
+        }
+      } catch (cleanupError) {
+        console.error('Knowledge cleanup error', cleanupError)
+      }
+
       setStatus({ kind: 'success', message: `Deleted ${fileName} successfully.` })
 
       // Refresh files list after deletion
@@ -461,7 +480,8 @@ export default function UploadPage() {
   const activeStatus = mode === 'file' ? status : linkStatus
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="relative min-h-screen overflow-hidden bg-background">
+      <PageBackground />
       {/* Dynamic Nav mimicking the Dashboard */}
       <DashboardNav tenantName={tenantName} />
 
@@ -830,7 +850,7 @@ export default function UploadPage() {
                     {linkedFiles.map((row) => (
                       <div
                         key={row.id}
-                        className="group flex items-center justify-between rounded-lg border border-border/60 bg-card px-3 py-2 transition-colors hover:bg-secondary/30"
+                        className="group flex items-start justify-between gap-2 rounded-lg border border-border/60 bg-card px-3 py-2 transition-colors hover:bg-secondary/30"
                       >
                         <div className="flex min-w-0 flex-1 flex-col">
                           <span className="truncate text-sm font-medium" title={row.filename}>
@@ -841,11 +861,13 @@ export default function UploadPage() {
                               href={row.source_url}
                               target="_blank"
                               rel="noreferrer"
-                              className="flex items-center gap-1 truncate text-xs text-muted-foreground hover:text-primary"
+                              className="mt-1 flex min-w-0 items-start gap-1 break-all text-xs text-muted-foreground hover:text-primary"
                               title={row.source_url}
                             >
-                              <ExternalLink className="size-3 shrink-0" />
-                              <span className="truncate">{row.source_url}</span>
+                              <ExternalLink className="mt-0.5 size-3 shrink-0" />
+                              <span className="min-w-0 overflow-hidden text-ellipsis whitespace-normal">
+                                {row.source_url}
+                              </span>
                             </a>
                           )}
                           {row.updated_at && (

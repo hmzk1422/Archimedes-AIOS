@@ -106,8 +106,64 @@ def fetch_existing_md(base_name, datatype_label, tenant_id=None):
         print(f"⚠️ Error fetching existing MD for {base_name}: {e}")
     return None
 
+
+def delete_knowledge_file(tenant_id, datatype_label, file_name):
+    """Delete the knowledge-base DB rows and vector documents for a storage file."""
+    base_name = os.path.splitext(file_name)[0]
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+
+    deleted_rows = 0
+    deleted_documents = 0
+
+    try:
+        query_url = f"{rest_url}?filename=eq.{base_name}&datatype=eq.{datatype_label}&tenant_id=eq.{tenant_id}&select=id"
+        response = requests.get(query_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            rows = response.json() or []
+            for row in rows:
+                delete_url = f"{rest_url}?id=eq.{row['id']}"
+                delete_response = requests.delete(delete_url, headers=headers, timeout=10)
+                if delete_response.status_code in {200, 204}:
+                    deleted_rows += 1
+    except Exception as exc:
+        print(f"⚠️ Failed to delete knowledge rows for {base_name}: {exc}")
+
+    try:
+        documents_url = f"{SUPABASE_URL}/rest/v1/documents"
+        document_query = f"metadata->>tenant_id=eq.{tenant_id}&metadata->>datatype=eq.{datatype_label}&metadata->>source=eq.{base_name}"  
+        response = requests.get(
+            f"{documents_url}?{document_query}&select=id",
+            headers=headers,
+            timeout=10,
+        )
+        if response.status_code == 200:
+            docs = response.json() or []
+            for doc in docs:
+                delete_response = requests.delete(
+                    f"{documents_url}?id=eq.{doc['id']}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if delete_response.status_code in {200, 204}:
+                    deleted_documents += 1
+    except Exception as exc:
+        print(f"⚠️ Failed to delete vector documents for {base_name}: {exc}")
+
+    return {
+        "deleted_rows": deleted_rows,
+        "deleted_documents": deleted_documents,
+        "base_name": base_name,
+    }
+
 def preprocess(tenant_id=None, datatype_label="policies"):
     print(f"\n--- Processing PDFs from Supabase Storage for {datatype_label.upper()} ---")
+
+    # 🌟 FIXED: Defined at the absolute top so nested functions can access it
+    SUPABASE_KEY = os.getenv("SUPADB_API") 
 
     client = LlamaCloud()
     md_header_splits = []
@@ -119,7 +175,6 @@ def preprocess(tenant_id=None, datatype_label="policies"):
 
     try:
         bucket_name = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
-        # List objects under tenant and datatype subfolder if provided
         list_path = f"{tenant_scope}/{datatype_label}".strip("/") if tenant_scope or datatype_label else ""
         storage_objects = supabase.storage.from_(bucket_name).list(path=list_path)
     except Exception as exc:
@@ -130,14 +185,9 @@ def preprocess(tenant_id=None, datatype_label="policies"):
         raw_name = (item.get("name") or "").strip()
         if not raw_name or raw_name in {".", ".."}:
             continue
-
-        # Skip folders
         if raw_name.endswith("/"):
             continue
 
-        # Determine the relative object path inside the bucket. When listing with
-        # a `list_path`, some SDKs return only the filename, others return the
-        # full relative path. Normalize to avoid double-prefixing.
         if list_path and raw_name.startswith(list_path):
             relative_path = raw_name
         elif '/' in raw_name and not list_path:
@@ -145,7 +195,6 @@ def preprocess(tenant_id=None, datatype_label="policies"):
         else:
             relative_path = f"{list_path}/{raw_name}".strip("/") if list_path else raw_name
 
-        # Use basename for filename/extension checks and DB filename keys
         filename_only = os.path.basename(relative_path)
         ext = os.path.splitext(filename_only)[1].lower()
         if ext != ".pdf":
@@ -211,8 +260,8 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             print("Saving raw Markdown to Supabase table...")
             rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
             rest_headers = {
-                "apikey": os.getenv("SUPADB_API"),
-                "Authorization": f"Bearer {os.getenv('SUPADB_API')}",
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
                 "Content-Type": "application/json",
                 "Prefer": "return=minimal"
             }
@@ -235,22 +284,49 @@ def preprocess(tenant_id=None, datatype_label="policies"):
                 split.metadata["source"] = base_name
                 split.metadata["datatype"] = datatype_label
                 split.metadata["tenant_id"] = tenant_scope
-
             md_header_splits.extend(splits)
 
         except Exception as e:
             item_display = locals().get('filename_only') or locals().get('relative_path') or locals().get('raw_name') or 'unknown'
             print(f"❌ Failed to process {item_display}. Error: {e}")
 
+    def process_database_only_entries(tenant_scope, datatype_label):
+        """Fetches text directly from DB if it bypassed the storage bucket."""
+        rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+        query_url = f"{rest_url}?datatype=eq.{datatype_label}&select=filename,data"
+        if tenant_scope:
+            query_url += f"&tenant_id=eq.{tenant_scope}"
+                
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        response = requests.get(query_url, headers=headers)
+        
+        if response.status_code == 200:
+            rows = response.json()
+            for row in rows:
+                base_name = row.get("filename")
+                text_data = row.get("data")
+                
+                if check_if_embedded(base_name, datatype_label, tenant_scope):
+                    continue
+                    
+                if text_data:
+                    print(f"♻️ Chunking and embedding DB-only entry: {base_name}")
+                    splits = markdown_splitter.split_text(text_data)
+                    for split in splits:
+                        split.metadata["source"] = base_name
+                        split.metadata["datatype"] = datatype_label
+                        split.metadata["tenant_id"] = tenant_scope
+                    md_header_splits.extend(splits)
+
+    process_database_only_entries(tenant_scope, datatype_label)
+
     # ==========================================
     # 2. Vector Database Initialization (pgvector)
     # ==========================================
     print(f"\n--- Initializing pgvector in Supabase for {datatype_label.upper()} ---")
     
-    # Define SUPABASE_KEY locally if not globally defined for the SupabaseVectorStore
-    SUPABASE_KEY = os.getenv("SUPADB_API")
-        
-    # CHANGE THIS SPECIFIC BLOCK IN YOUR PREPROCESS FUNCTION
+    # 🌟 FIXED: Removed the redundant SUPABASE_KEY assignment from here
+
     if md_header_splits:
         vectorstore = SupabaseVectorStore.from_documents(
             md_header_splits,
@@ -260,8 +336,6 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             query_name="match_documents"
         )
     else:
-        # Explicitly use the vectorstore constructor to avoid 'id' ambiguity 
-        # during initialization
         vectorstore = SupabaseVectorStore(
             embedding=embeddings,
             client=supabase,
@@ -269,8 +343,6 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             query_name="match_documents"
         )
 
-    # Return the retriever scoped to the specific datatype using metadata filtering
-    # Build filter dynamically: include tenant_id only when present
     filter_kwargs = {"datatype": datatype_label}
     if tenant_scope:
         filter_kwargs["tenant_id"] = tenant_scope
@@ -282,6 +354,7 @@ def preprocess(tenant_id=None, datatype_label="policies"):
         }
     )
     return retriever
+
 
 # ==========================================
 # 4. Long-Term Memory Engine (User Profile)
@@ -572,9 +645,9 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
 
 USER REQUEST: {user_input}
 
-CRITICAL RULES FOR MULTI-STEP ACTIONS (LIKE CLAIMS):
-1. DATA GATHERING: If the user wants to lodge a claim, ask for the 'incident_date' and if they have all documents ready.
-2. EXECUTION: Once the user provides the date and confirms document readiness, YOU MUST IMMEDIATELY CALL THE `register_claim_details` TOOL. Do NOT ask any more questions. 
+CRITICAL RULES FOR MULTI-STEP ACTIONS:
+1. DATA GATHERING: Find a highlight of the user's words that may refer to tasks listed. Point out the task.
+2. PARAMETER GATHERING: Ask the user for parameters according to the task you believe is being addressed.
 3. Because of the security gate, do NOT perform the tool call yet if you are just thinking. Only output the tool call when you are ready to execute.
 """
     
