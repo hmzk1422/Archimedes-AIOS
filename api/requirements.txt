@@ -17,6 +17,12 @@ supabase
 # but ensure you have the postgres driver
 psycopg2-binary 
 
+# Telemetry / OpenTelemetry
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-grpc
+
 # Environment & Utilities
 python-dotenv
 requests

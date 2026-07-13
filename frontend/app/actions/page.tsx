@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
-import { Plus, Loader2, Trash2, Save, FileJson } from 'lucide-react'
+import { Plus, Loader2, Trash2, Save, FileJson, Shield, Puzzle } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import ExtensionPage from '@/components/dashboard/extensionpage'
+import HITLSettings from '@/components/hitl-settings'
 
 // 1. Define the exact structure based on your 6 parameters
 type AgentTask = {
@@ -376,6 +377,21 @@ export default function TasksPage() {
             </Card>
             <div className="lg:col-span-2">
                 <ExtensionPage />
+            </div>
+
+            {/* HITL Settings Section */}
+            <div className="lg:col-span-2 mt-8">
+              <div className="mb-6">
+                <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Governance</p>
+                <h2 className="mt-1 font-display text-2xl font-bold tracking-tight flex items-center gap-2">
+                  <Shield className="size-6 text-primary" />
+                  Human-In-The-Loop Settings
+                </h2>
+                <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                  Configure HITL trigger rules. These settings are stored alongside task configurations in the database.
+                </p>
+              </div>
+              <HITLSettings />
             </div>
 
           </div>
