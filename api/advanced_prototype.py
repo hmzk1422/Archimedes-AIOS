@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
-from langchain_core.output_parsers import StrOutputParser  # <--- IMPORTED STR OUTPUT PARSER
+from langchain_core.output_parsers import StrOutputParser
 
 # Llama Cloud SDK (Parse API v2)
 from llama_cloud import LlamaCloud
@@ -18,10 +18,10 @@ from llama_cloud import LlamaCloud
 # LangGraph
 from langgraph.graph import StateGraph, START, END
 
-# RAGAS Evaluation
-from ragas import EvaluationDataset
-from ragas.metrics.collections import Faithfulness, AnswerRelevancy, ContextPrecision
-from ragas import evaluate
+# RAGAS Core & Wrappers (The Fix for v0.2.0+)
+from ragas import evaluate, EvaluationDataset
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
 
 # Load environment variables
 load_dotenv()
@@ -30,34 +30,33 @@ load_dotenv()
 # 1. Pipeline State Definition
 # =====================================================================
 class RAGState(TypedDict):
-    file_path: str               # Input path of the document
-    query: str                   # User query
-    raw_documents: List[Document]# Loaded & chunked documents
-    retrieved_docs: List[Document] # Matches from vector store query
-    reranked_docs: List[Document]  # Reranked documents
-    extracted_context: str       # Condensed contextual facts
-    reasoning_process: str       # Internal CoT & Reflection steps
-    final_answer: str            # Final verified response to the user
-    evaluation_metrics: dict     # Ragas scorecard results
+    file_path: str               
+    query: str                   
+    raw_documents: List[Document]
+    retrieved_docs: List[Document] 
+    reranked_docs: List[Document]  
+    extracted_context: str       
+    reasoning_process: str       
+    final_answer: str            
+    evaluation_metrics: dict     
 
 # =====================================================================
 # 2. Setup AI Models (Cheap vs. Heavy)
 # =====================================================================
 cheap_llm = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite", 
+    model="gemini-3.1-flash-lite", # Updated to current standard flash model
     google_api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.1
 )
 
 heavy_llm = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite", 
+    model="gemini-3.1-flash-lite", # Updated to current standard pro model
     google_api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.2
 )
 
 embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
-# Initialize the reusable string parser
 string_parser = StrOutputParser()
 
 # =====================================================================
@@ -65,45 +64,28 @@ string_parser = StrOutputParser()
 # =====================================================================
 
 def parse_and_index_node(state: RAGState) -> dict:
-    """
-    Uses the new Llama Cloud SDK (Parse API v2) to extract structured layout details
-    and text from the file. Splits the document and prepares it for retrieval.
-    """
     print("\n--- [1/6] Running Llama Cloud Document Parsing (v2 API) ---")
     file_path = state["file_path"]
     
-    # Initialize the modern LlamaCloud client
     client = LlamaCloud(api_key=os.getenv("LLAMA_CLOUD_API_KEY"))
+    uploaded_file = client.files.create(file=Path(file_path), purpose="parse")
     
-    # 1. Upload the file
-    uploaded_file = client.files.create(
-        file=Path(file_path),
-        purpose="parse"
-    )
-    
-    # 2. Trigger the parse job using the v2 API
-    # Using the 'agentic' tier for high-quality table, image, and layout extraction
     parse_result = client.parsing.parse(
         file_id=uploaded_file.id,
         tier="agentic",
         version="latest",
-        expand=["markdown"]  # Request structured markdown back directly
+        expand=["markdown"]  
     )
     
-    # 3. Convert Llama Cloud pages back to LangChain Document schemas
     lc_docs = []
     for page in parse_result.markdown.pages:
         lc_docs.append(
             Document(
                 page_content=page.markdown, 
-                metadata={
-                    "source": file_path, 
-                    "page_number": page.page_number
-                }
+                metadata={"source": file_path, "page_number": page.page_number}
             )
         )
     
-    # 4. Split documents into chunks using clean Markdown separation
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
     split_docs = text_splitter.split_documents(lc_docs)
     
@@ -125,7 +107,7 @@ def retrieve_node(state: RAGState) -> dict:
 
 
 def rerank_node(state: RAGState) -> dict:
-    print("\n--- [3/6] LLM-based Reranking (gemini-3.1-flash-lite) ---")
+    print("\n--- [3/6] LLM-based Reranking ---")
     query = state["query"]
     candidates = state["retrieved_docs"]
     
@@ -143,12 +125,10 @@ def rerank_node(state: RAGState) -> dict:
     """
     
     scored_docs = []
-    # Pipe the LLM into the string parser
     rerank_chain = cheap_llm | string_parser
 
     for doc in candidates:
         formatted_prompt = rerank_prompt.format(query=query, doc_content=doc.page_content)
-        # response_text is guaranteed to be a string now!
         response_text = rerank_chain.invoke([HumanMessage(content=formatted_prompt)])
         
         match = re.search(r"SCORE:\s*(\d+)", response_text)
@@ -163,7 +143,7 @@ def rerank_node(state: RAGState) -> dict:
 
 
 def extract_context_node(state: RAGState) -> dict:
-    print("\n--- [4/6] Contextual Fact Extraction (gemini-3.1-flash-lite) ---")
+    print("\n--- [4/6] Contextual Fact Extraction ---")
     query = state["query"]
     docs = state["reranked_docs"]
     
@@ -178,7 +158,6 @@ def extract_context_node(state: RAGState) -> dict:
     {context_str}
     """
     
-    # Pipe the LLM into the string parser to avoid lists here too
     extraction_chain = cheap_llm | string_parser
     response_text = extraction_chain.invoke([HumanMessage(content=extraction_prompt)])
     
@@ -187,7 +166,7 @@ def extract_context_node(state: RAGState) -> dict:
 
 
 def generate_response_node(state: RAGState) -> dict:
-    print("\n--- [5/6] Context-Aware Generation (gemini-3.5-flash with CoT & Reflection) ---")
+    print("\n--- [5/6] Context-Aware Generation (CoT & Reflection) ---")
     query = state["query"]
     facts = state["extracted_context"]
     
@@ -216,7 +195,6 @@ def generate_response_node(state: RAGState) -> dict:
     {facts}
     """
     
-    # Pipe the heavy LLM into the string parser
     generation_chain = heavy_llm | string_parser
     full_output = generation_chain.invoke([
         SystemMessage(content=system_prompt),
@@ -243,36 +221,34 @@ def evaluate_node(state: RAGState) -> dict:
     
     scores = {}
     try:
-        try:
-            from ragas import EvaluationDataset
-            dataset = EvaluationDataset.from_list([{
-                "user_input": query,
-                "response": final_answer,
-                "retrieved_contexts": contexts
-            }])
-        except ImportError:
-            from datasets import Dataset
-            dataset = Dataset.from_dict({
-                "question": [query],
-                "answer": [final_answer],
-                "contexts": [contexts]
-            })
+        # 1. Initialize Ragas Wrappers for LangChain models
+        ragas_llm = LangchainLLMWrapper(cheap_llm)
+        ragas_embeddings = LangchainEmbeddingsWrapper(embeddings)
+
+        # 2. Build the dataset using the modern EvaluationDataset approach
+        dataset = EvaluationDataset.from_list([{
+            "user_input": query,
+            "response": final_answer,
+            "retrieved_contexts": contexts
+        }])
             
-        try:
-            from ragas.metrics.collections import Faithfulness, AnswerRelevancy, ContextPrecision
-            metrics = [Faithfulness(), AnswerRelevancy(), ContextPrecision()]
-        except ImportError:
-            try:
-                from ragas.metrics import Faithfulness, AnswerRelevancy, ContextPrecision
-                metrics = [Faithfulness(), AnswerRelevancy(), ContextPrecision()]
-            except ImportError:
-                metrics = []
+        # Use legacy metrics from ragas.metrics (not v2 collections) 
+        # which accept LangChain LLMs directly and work with Gemini
+        from ragas.metrics import Faithfulness, AnswerRelevancy, LLMContextPrecisionWithoutReference
             
+        # 3. Pass the raw LangChain LLM directly (legacy metrics accept BaseLanguageModel)
+        metrics = [
+            Faithfulness(llm=cheap_llm),
+            AnswerRelevancy(llm=cheap_llm, embeddings=embeddings),
+            LLMContextPrecisionWithoutReference(llm=cheap_llm),
+        ]
+            
+        # 4. Pass the wrappers explicitly into the evaluate function
         eval_result = evaluate(
             dataset=dataset,
             metrics=metrics,
-            llm=cheap_llm,
-            embeddings=embeddings
+            llm=ragas_llm,
+            embeddings=ragas_embeddings
         )
         
         if hasattr(eval_result, "to_pandas"):
