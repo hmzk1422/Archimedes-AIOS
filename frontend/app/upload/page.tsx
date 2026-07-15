@@ -492,7 +492,7 @@ export default function UploadPage() {
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             Drop in documents — or point us at a link — and the agent ingests them automatically. Files are
             organized by datatype so answers stay grounded in the right context. You can also manage existing
-            files here.
+            files here. <b>File type: PDF</b>
           </p>
         </div>
 
