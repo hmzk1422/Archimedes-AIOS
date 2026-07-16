@@ -1,5 +1,6 @@
 import os
 import re
+import json  # Added for local caching of parsed results
 from pathlib import Path
 from typing import List, TypedDict
 from dotenv import load_dotenv
@@ -66,25 +67,57 @@ string_parser = StrOutputParser()
 def parse_and_index_node(state: RAGState) -> dict:
     print("\n--- [1/6] Running Llama Cloud Document Parsing (v2 API) ---")
     file_path = state["file_path"]
-    
-    client = LlamaCloud(api_key=os.getenv("LLAMA_CLOUD_API_KEY"))
-    uploaded_file = client.files.create(file=Path(file_path), purpose="parse")
-    
-    parse_result = client.parsing.parse(
-        file_id=uploaded_file.id,
-        tier="agentic",
-        version="latest",
-        expand=["markdown"]  
-    )
+    cache_path = Path(f"{file_path}.parsed.json")
     
     lc_docs = []
-    for page in parse_result.markdown.pages:
-        lc_docs.append(
-            Document(
-                page_content=page.markdown, 
-                metadata={"source": file_path, "page_number": page.page_number}
-            )
+    
+    # Check if a cached parsed file already exists locally
+    if cache_path.exists():
+        print(f"Found cached Llama-parsed file at '{cache_path}'. Skipping API call...")
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cached_data = json.load(f)
+            for item in cached_data:
+                lc_docs.append(
+                    Document(
+                        page_content=item["page_content"],
+                        metadata={"source": file_path, "page_number": item["page_number"]}
+                    )
+                )
+        except Exception as e:
+            print(f"Error reading cache file: {e}. Falling back to live parsing...")
+            lc_docs = []
+
+    # If no cache was found, parse via Llama Cloud and save the results
+    if not lc_docs:
+        print("No cache found. Querying Llama Cloud API...")
+        client = LlamaCloud(api_key=os.getenv("LLAMA_CLOUD_API_KEY"))
+        uploaded_file = client.files.create(file=Path(file_path), purpose="parse")
+        
+        parse_result = client.parsing.parse(
+            file_id=uploaded_file.id,
+            tier="agentic",
+            version="latest",
+            expand=["markdown"]  
         )
+        
+        cache_data = []
+        for page in parse_result.markdown.pages:
+            lc_docs.append(
+                Document(
+                    page_content=page.markdown, 
+                    metadata={"source": file_path, "page_number": page.page_number}
+                )
+            )
+            cache_data.append({
+                "page_content": page.markdown,
+                "page_number": page.page_number
+            })
+        
+        # Save the parsed results locally for future runs
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        print(f"Successfully saved parsed results to cache: '{cache_path}'")
     
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
     split_docs = text_splitter.split_documents(lc_docs)
@@ -292,7 +325,7 @@ app = workflow.compile()
 # =====================================================================
 if __name__ == "__main__":
     test_file = "sample.pdf"
-    test_query = "What are the core performance metrics discussed in the document, and what are their specific numeric targets?"
+    test_query = "Kamu bisa list down semua 77 penyakit tersebut ga di dalam legacy pro?"
     
     if not os.path.exists(test_file):
         with open(test_file, "w", encoding="utf-8") as f:
@@ -319,7 +352,7 @@ if __name__ == "__main__":
     print("=========================================")
     print(final_state["reasoning_process"])
     print("\n=========================================")
-    print("           RAGAS SCORECARD               ")
+    print("                 RAGAS SCORECARD               ")
     print("=========================================")
     for metric, score in final_state["evaluation_metrics"].items():
         if metric not in ["user_input", "response", "retrieved_contexts", "question", "contexts", "answer"]:

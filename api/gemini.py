@@ -31,7 +31,7 @@ from typing import Any
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", google_api_key=api_key)
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", google_api_key=api_key, temperature=0.2)
 embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://localhost:11434")
 
 def extract_text(content):
