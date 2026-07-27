@@ -85,47 +85,74 @@ export default function UploadPage() {
   const [linkedFiles, setLinkedFiles] = useState<any[]>([])
   const [fetchingLinkedFiles, setFetchingLinkedFiles] = useState(false)
 
-  // Fetch datatypes from the customer-service-provider table
+  // Fetch datatypes from BOTH the database table AND storage folders
   const refreshDatatypes = useCallback(async (uid: string, silent = false) => {
   if (!silent) setStatus({ kind: 'info', message: 'Refreshing datatypes from database…' })
 
   try {
     const supabase = createClient()
+    const bucket = process.env.NEXT_PUBLIC_SUPABASE_BUCKET || 'customer-service-provider'
 
+    // Source 1: Datatypes from the database table (rows with files already ingested)
+    const dbDatatypes: string[] = []
     const { data, error } = await supabase
       .from('customer-service-provider')
       .select('datatype')
       .eq('tenant_id', uid)
       .neq('datatype', 'tasks')
 
-    if (error) throw error
+    if (!error && data) {
+      data.forEach((item) => {
+        if (item.datatype) dbDatatypes.push(item.datatype)
+      })
+    }
 
-    if (data) {
-      const fetchedFolders = Array.from(
-        new Set(data.map((item) => item.datatype).filter(Boolean))
-      ).sort()
+    // Source 2: Datatypes from storage folders (even if no DB rows exist yet)
+    const storageDatatypes: string[] = []
+    try {
+      const { data: storageItems, error: storageError } = await supabase.storage
+        .from(bucket)
+        .list(uid, { limit: 100, sortBy: { column: 'name', order: 'asc' } })
 
-      // CRITICAL: Always update the available datatypes list with what came from the DB
-      setDatatypes(fetchedFolders)
-
-      if (fetchedFolders.length > 0) {
-        setDatatype((currentDatatype) => {
-          // If the current datatype is still valid, keep it; otherwise use the first available one
-          return fetchedFolders.includes(currentDatatype) ? currentDatatype : fetchedFolders[0]
+      if (!storageError && storageItems) {
+        storageItems.forEach((item) => {
+          // Folders end with '/' or have no extension and have an id
+          const name = item.name
+          if (name && (name.endsWith('/') || (!name.includes('.') && item.id))) {
+            const folderName = name.replace(/\/$/, '')
+            if (folderName && folderName !== '.emptyFolderPlaceholder') {
+              storageDatatypes.push(folderName)
+            }
+          }
         })
+      }
+    } catch {
+      // Storage list may fail silently — not critical
+    }
 
-        if (!silent) setStatus({ kind: 'success', message: 'Datatypes synced with database.' })
-      } else {
-        // CRITICAL: Explicitly clear the active datatype if the account is completely empty
-        setDatatype('')
-        if (!silent) {
-          setStatus({ kind: 'info', message: 'No existing datatypes found in database.' })
-        }
+    // Merge both sources, deduplicate, and sort
+    const merged = Array.from(new Set([...dbDatatypes, ...storageDatatypes])).sort()
+
+    // Always update the available datatypes list with the merged result
+    setDatatypes(merged)
+
+    if (merged.length > 0) {
+      setDatatype((currentDatatype) => {
+        // If the current datatype is still valid, keep it; otherwise use the first available one
+        return merged.includes(currentDatatype) ? currentDatatype : merged[0]
+      })
+
+      if (!silent) setStatus({ kind: 'success', message: 'Datatypes synced with database and storage.' })
+    } else {
+      // Only clear if BOTH sources are empty
+      setDatatype('')
+      if (!silent) {
+        setStatus({ kind: 'info', message: 'No datatypes found. Create one below.' })
       }
     }
   } catch (error) {
     if (!silent) {
-      setStatus({ kind: 'error', message: 'Failed to fetch datatypes from database.' })
+      setStatus({ kind: 'error', message: 'Failed to fetch datatypes.' })
     }
   }
 }, [])

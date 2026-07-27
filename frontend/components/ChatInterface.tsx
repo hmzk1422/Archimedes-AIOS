@@ -2,19 +2,28 @@
 
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Bot, User, Loader2, Sparkles } from 'lucide-react';
+import { Send, Bot, User, Loader2, Sparkles, Check, X } from 'lucide-react';
+
+type Message = {
+  role: 'user' | 'bot';
+  content: string;
+  hitl_pending?: boolean;
+  hitl_action?: string;
+  hitl_reason?: string;
+  message_id?: number;
+};
 
 export default function ChatInterface({ tenantId }: { tenantId: string }) {
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<Message[]>([
     { role: 'bot', content: 'Hello! How can I assist you today?' }
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
+  const sendMessage = async (messageText?: string) => {
+    const userMessage = messageText || input;
+    if (!userMessage.trim() || loading) return;
 
-    const userMessage = input;
     setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
     setInput('');
     setLoading(true);
@@ -26,9 +35,59 @@ export default function ChatInterface({ tenantId }: { tenantId: string }) {
         body: JSON.stringify({ message: userMessage, tenant_id: tenantId }),
       });
       const data = await response.json();
-      setMessages((prev) => [...prev, { role: 'bot', content: data.response }]);
+      
+      const botMessage: Message = {
+        role: 'bot',
+        content: data.response || '⚠️ No response from server.',
+        hitl_pending: data.hitl_pending || false,
+        hitl_action: data.hitl_action,
+        hitl_reason: data.hitl_reason,
+        message_id: Date.now(),
+      };
+      
+      setMessages((prev) => [...prev, botMessage]);
     } catch {
       setMessages((prev) => [...prev, { role: 'bot', content: '⚠️ Connection failed.' }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleHITLApprove = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('http://localhost:8000/chat/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: tenantId, approve: true }),
+      });
+      const data = await response.json();
+      setMessages((prev) => [...prev, { 
+        role: 'bot', 
+        content: data.response || '✅ Action approved and executed.',
+      }]);
+    } catch {
+      setMessages((prev) => [...prev, { role: 'bot', content: '⚠️ Failed to approve action.' }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleHITLReject = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('http://localhost:8000/chat/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: tenantId, approve: false }),
+      });
+      const data = await response.json();
+      setMessages((prev) => [...prev, { 
+        role: 'bot', 
+        content: data.response || '❌ Action rejected.',
+      }]);
+    } catch {
+      setMessages((prev) => [...prev, { role: 'bot', content: '⚠️ Failed to reject action.' }]);
     } finally {
       setLoading(false);
     }
@@ -58,6 +117,32 @@ export default function ChatInterface({ tenantId }: { tenantId: string }) {
               <div className="prose prose-sm dark:prose-invert max-w-none">
                 <ReactMarkdown>{m.content}</ReactMarkdown>
               </div>
+              {/* HITL Approval Buttons */}
+              {m.hitl_pending && (
+                <div className="mt-4 flex items-center gap-3 border-t border-border/50 pt-3">
+                  <button
+                    onClick={handleHITLApprove}
+                    disabled={loading}
+                    className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    <Check className="size-4" />
+                    Approve
+                  </button>
+                  <button
+                    onClick={handleHITLReject}
+                    disabled={loading}
+                    className="flex items-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-xs font-semibold text-destructive hover:bg-destructive/20 transition-colors disabled:opacity-50"
+                  >
+                    <X className="size-4" />
+                    Reject
+                  </button>
+                  {m.hitl_action && (
+                    <span className="text-[10px] text-muted-foreground ml-auto">
+                      Action: {m.hitl_action}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -86,7 +171,7 @@ export default function ChatInterface({ tenantId }: { tenantId: string }) {
             onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
           />
           <button 
-            onClick={sendMessage}
+            onClick={() => sendMessage()}
             disabled={loading}
             className="p-2 bg-primary text-primary-foreground hover:opacity-90 rounded-md transition-colors disabled:opacity-50"
           >

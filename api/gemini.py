@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 
 from llama_cloud import LlamaCloud
 
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_chroma import Chroma
@@ -25,14 +25,60 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, create_model, Field
 from typing import Any
 
+# RAGAS Evaluation
+from ragas import evaluate, EvaluationDataset
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from flashrank import Ranker, RerankRequest
+from langchain_core.documents import Document
+
 # ==========================================
 # 1. Setup AI Models
 # ==========================================
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", google_api_key=api_key, temperature=0.2)
-embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://localhost:11434")
+# FIX 1: Fixed dual-model strategy.
+# cheap_llm stays on "gemini-3.1-flash-lite" (lightweight) for routing,
+# extraction, and lightweight tasks.
+# heavy_llm also uses "gemini-3.1-flash-lite" for CoT/Reflection.
+cheap_llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite",
+    google_api_key=api_key,
+    temperature=0.1
+)
+
+heavy_llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite",
+    google_api_key=api_key,
+    temperature=0.2
+)
+
+ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+# Default llm alias for backward compatibility with existing code
+llm = cheap_llm
+
+# ==========================================
+# 1b. Embeddings Provider Selection
+# ==========================================
+# EMBEDDINGS_PROVIDER env var controls which embeddings backend to use.
+#   "ollama" (default) → free local nomic-embed-text via Ollama (no API cost)
+#   "google"           → GoogleGenerativeAIEmbeddings (cloud-native, pay-per-use)
+EMBEDDINGS_PROVIDER = os.getenv("EMBEDDINGS_PROVIDER", "ollama").lower()
+
+if EMBEDDINGS_PROVIDER == "google":
+    print("[Embeddings] Using GoogleGenerativeAIEmbeddings (cloud-native)")
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004",
+        google_api_key=api_key,
+    )
+else:
+    print("[Embeddings] Using OllamaEmbeddings with nomic-embed-text (local, free)")
+    from langchain_ollama import OllamaEmbeddings
+    embeddings = OllamaEmbeddings(
+        model="nomic-embed-text",
+    )
 
 def extract_text(content):
     """Safely flattens LangChain/Gemini content blocks into a clean string."""
@@ -205,25 +251,10 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             base_name = os.path.splitext(filename_only)[0]
             object_path = relative_path
 
-            md_already_parsed = check_if_md_exists(base_name, datatype_label, tenant_id=tenant_scope or None)
             embeddings_already_exist = check_if_embedded(base_name, datatype_label, tenant_id=tenant_scope or None)
 
-            if md_already_parsed and embeddings_already_exist:
-                print(f"✅ {base_name} already parsed and embedded for this tenant. Skipping.")
-                continue
-
-            if md_already_parsed and not embeddings_already_exist:
-                print(f"♻️ {base_name} MD exists but not embedded for this tenant — re-embedding without LlamaParse.")
-                md_content = fetch_existing_md(base_name, datatype_label, tenant_id=tenant_scope or None)
-                if not md_content:
-                    print(f"⚠️ Could not load existing MD for {base_name}, skipping.")
-                    continue
-                splits = markdown_splitter.split_text(md_content)
-                for split in splits:
-                    split.metadata["source"] = base_name
-                    split.metadata["datatype"] = datatype_label
-                    split.metadata["tenant_id"] = tenant_scope
-                md_header_splits.extend(splits)
+            if embeddings_already_exist:
+                print(f"✅ {base_name} already vectorized in 'documents'. Skipping parse.")
                 continue
 
             try:
@@ -248,13 +279,23 @@ def preprocess(tenant_id=None, datatype_label="policies"):
                 purpose="parse"
             )
 
+            # 👇 ADD THE PARSING INSTRUCTION HERE
+            table_prompt = (
+                "You are parsing insurance documents. Whenever you encounter a comparison table "
+                "with multiple plans (e.g., Standard, Extra, Premier), DO NOT output a standard Markdown grid. "
+                "Instead, flatten the table into explicit text sentences for every cell. "
+                "Example: 'For the Premier Plan, the Outpatient Benefit limit is $500.' "
+                "Ensure the plan name and the benefit name are explicitly stated on every single line."
+            )
+
             result = client.parsing.parse(
                 file_id=file_obj.id,
                 tier="agentic",
                 version="latest",
+                agentic_options={"custom_prompt": table_prompt}, # <-- v2 API: nested under agentic_options
                 expand=["markdown"]
             )
-
+            
             md_content = "\n\n".join([page.markdown for page in result.markdown.pages])
 
             print("Saving raw Markdown to Supabase table...")
@@ -293,7 +334,8 @@ def preprocess(tenant_id=None, datatype_label="policies"):
     def process_database_only_entries(tenant_scope, datatype_label):
         """Fetches text directly from DB if it bypassed the storage bucket."""
         rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
-        query_url = f"{rest_url}?datatype=eq.{datatype_label}&select=filename,data"
+        # ✅ FIX: Select tenant_id as well
+        query_url = f"{rest_url}?datatype=eq.{datatype_label}&select=filename,data,tenant_id"
         if tenant_scope:
             query_url += f"&tenant_id=eq.{tenant_scope}"
                 
@@ -305,17 +347,19 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             for row in rows:
                 base_name = row.get("filename")
                 text_data = row.get("data")
+                # ✅ FIX: Fallback to row tenant_id if tenant_scope is empty
+                row_tenant = row.get("tenant_id") or tenant_scope or ""
                 
-                if check_if_embedded(base_name, datatype_label, tenant_scope):
+                if check_if_embedded(base_name, datatype_label, row_tenant):
                     continue
                     
                 if text_data:
-                    print(f"♻️ Chunking and embedding DB-only entry: {base_name}")
+                    print(f"♻️ Chunking and embedding DB-only entry: {base_name} for tenant: {row_tenant}")
                     splits = markdown_splitter.split_text(text_data)
                     for split in splits:
                         split.metadata["source"] = base_name
                         split.metadata["datatype"] = datatype_label
-                        split.metadata["tenant_id"] = tenant_scope
+                        split.metadata["tenant_id"] = row_tenant # ✅ Assigned correctly
                     md_header_splits.extend(splits)
 
     process_database_only_entries(tenant_scope, datatype_label)
@@ -349,7 +393,7 @@ def preprocess(tenant_id=None, datatype_label="policies"):
 
     retriever = vectorstore.as_retriever(
         search_kwargs={
-            "k": 5,
+            "k": 10,
             "filter": filter_kwargs
         }
     )
@@ -359,33 +403,77 @@ def preprocess(tenant_id=None, datatype_label="policies"):
 # ==========================================
 # 4. Long-Term Memory Engine (User Profile)
 # ==========================================
-os.makedirs("memory", exist_ok=True)
+# USE_SUPABASE_MEMORY env var controls where user profiles are stored.
+#   "false" (default) → local JSON files in api/memory/ (no DB table needed)
+#   "true"            → Supabase "user_profiles" table (requires table setup)
+_USE_SUPABASE_MEMORY = os.getenv("USE_SUPABASE_MEMORY", "false").lower() == "true"
 
-def _profile_path_for(tenant_id: str | None, customer_id: str | None = None):
-    key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
-    return f"memory/user_profile_{key}.json"
+def _profile_path_for(tenant_id: str | None = None, customer_id: str | None = None) -> str:
+    """Returns the local JSON file path for a user profile."""
+    memory_dir = os.path.join(os.path.dirname(__file__), "memory")
+    os.makedirs(memory_dir, exist_ok=True)
+    safe_tenant = re.sub(r'[^a-zA-Z0-9_-]', '', tenant_id or "global")
+    safe_customer = re.sub(r'[^a-zA-Z0-9_-]', '', customer_id or "shared")
+    return os.path.join(memory_dir, f"profile_{safe_tenant}_{safe_customer}.json")
 
-def _history_path_for(tenant_id: str | None, customer_id: str | None = None):
-    key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
-    return f"memory/chat_history_{key}.json"
+def _profile_table_name():
+    """Returns the Supabase table name for user profiles."""
+    return "user_profiles"
+
+def _history_table_name():
+    """Returns the Supabase table name for chat histories."""
+    return "chat_histories"
 
 def load_user_profile(tenant_id: str | None = None, customer_id: str | None = None):
-    PROFILE_FILE = _profile_path_for(tenant_id, customer_id)
-    if os.path.exists(PROFILE_FILE):
-        with open(PROFILE_FILE, "r") as f:
+    """Loads user profile from local JSON (default) or Supabase (opt-in)."""
+    if _USE_SUPABASE_MEMORY:
+        try:
+            query = supabase.table(_profile_table_name())\
+                .select("profile_data")\
+                .eq("tenant_id", tenant_id or "global")\
+                .eq("customer_id", customer_id or "shared")\
+                .limit(1)\
+                .execute()
+            if query.data and len(query.data) > 0:
+                raw = query.data[0].get("profile_data")
+                if isinstance(raw, str):
+                    return json.loads(raw)
+                elif isinstance(raw, dict):
+                    return raw
+        except Exception as e:
+            print(f"WARNING: Failed to load user profile from Supabase: {e}")
+        return {}
+    else:
+        # Local JSON file fallback
+        path = _profile_path_for(tenant_id, customer_id)
+        if os.path.exists(path):
             try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-    return {}
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"WARNING: Failed to load local profile: {e}")
+        return {}
 
 def save_user_profile(profile_data, tenant_id: str | None = None, customer_id: str | None = None):
-    PROFILE_FILE = _profile_path_for(tenant_id, customer_id)
-    with open(PROFILE_FILE, "w") as f:
-        json.dump(profile_data, f, indent=4)
+    """Saves user profile to local JSON (default) or Supabase (opt-in)."""
+    if _USE_SUPABASE_MEMORY:
+        try:
+            supabase.table(_profile_table_name()).upsert({
+                "tenant_id": tenant_id or "global",
+                "customer_id": customer_id or "shared",
+                "profile_data": profile_data,
+            }, on_conflict="tenant_id,customer_id").execute()
+        except Exception as e:
+            print(f"WARNING: Failed to save user profile to Supabase: {e}")
+    else:
+        path = _profile_path_for(tenant_id, customer_id)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(profile_data, f, indent=2, ensure_ascii=False)
+        except IOError as e:
+            print(f"WARNING: Failed to save local profile: {e}")
 
-
-def extract_and_update_facts(user_input, current_profile, tenant_id: str | None = None):
+def extract_and_update_facts(user_input, current_profile, tenant_id: str | None = None, customer_id: str | None = None):
     extractor_prompt = f"""You are a data extraction assistant. Look at the user's input and extract any hard personal facts (e.g., age, occupation, medical conditions, budget).
     
     Current User Profile: {json.dumps(current_profile)}
@@ -396,23 +484,35 @@ def extract_and_update_facts(user_input, current_profile, tenant_id: str | None 
     Do not output any markdown formatting (like ```json). Just the raw JSON braces."""
     
     try:
-        response = llm.invoke([HumanMessage(content=extractor_prompt)])
+        response = cheap_llm.invoke([HumanMessage(content=extractor_prompt)])
         raw_content = extract_text(response.content)
         clean_json_string = raw_content.strip().strip('`').replace('json\n', '', 1)
         updated_profile = json.loads(clean_json_string)
-        save_user_profile(updated_profile, tenant_id)
+        save_user_profile(updated_profile, tenant_id, customer_id)
         return updated_profile
     except Exception:
         return current_profile
-        
-# Cache of FileChatMessageHistory per tenant to avoid reopening files repeatedly
+
+# In-memory session history cache (fast, no I/O)
 _session_history_cache: dict = {}
 
 def get_session_history(tenant_id: str | None = None, customer_id: str | None = None):
-    path = _history_path_for(tenant_id, customer_id)
-    if path not in _session_history_cache:
-        _session_history_cache[path] = FileChatMessageHistory(path)
-    return _session_history_cache[path]
+    """Returns an in-memory chat message history for the given tenant/customer.
+    This avoids local file I/O and is safe for multi-threaded environments.
+    For production persistence, this should be backed by Redis or Supabase."""
+    key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
+    if key not in _session_history_cache:
+        from langchain_core.messages import BaseMessage
+        class InMemoryChatMessageHistory:
+            """Lightweight in-memory chat history that mimics FileChatMessageHistory interface."""
+            def __init__(self):
+                self.messages: list[BaseMessage] = []
+            def add_user_message(self, message: str):
+                self.messages.append(HumanMessage(content=message))
+            def add_ai_message(self, message: str):
+                self.messages.append(AIMessage(content=message))
+        _session_history_cache[key] = InMemoryChatMessageHistory()
+    return _session_history_cache[key]
 
 from hitl import evaluate_hitl, detect_sentiment, HITLDecision
 from hitl_notifier import notify_hitl_triggered
@@ -443,7 +543,7 @@ def get_routing_decision(user_input, available_streams):
     Respond with ONLY the exact word of the selected stream. No other text, no markdown."""
     
     try:
-        response = llm.invoke([HumanMessage(content=router_prompt)])
+        response = cheap_llm.invoke([HumanMessage(content=router_prompt)])
         decision = extract_text(response.content).strip().lower()
         
         # Clean up the output to prevent routing errors
@@ -456,6 +556,269 @@ def get_routing_decision(user_input, available_streams):
         
     # Safe fallback to the first available datatype
     return available_streams[0]
+
+# ==========================================
+# 5b. QUERY REWRITING (The "Brain" Layer)
+# ==========================================
+
+def rewrite_search_query(user_input: str, datatype: str = "policies") -> str:
+    """
+    FIX 4: Rewrites a conversational user query into a precise search query
+    that matches the terminology used in the knowledge base documents.
+    
+    The domain context is parameterized via the `datatype` parameter so this
+    works for any tenant (insurance, e-commerce, legal, IT, etc.) without
+    hardcoded insurance-specific instructions.
+    
+    Uses the cheap_llm to transform vague/natural language into 
+    document-aligned search terms.
+    """
+    rewrite_prompt = f"""You are a search query optimization specialist for a knowledge base.
+
+    Rewrite the user's conversational question into a precise search query that will match 
+    the exact terminology used in the domain's documents (datatype: "{datatype}").
+
+    Rules:
+    - Use formal domain-specific terminology relevant to "{datatype}" documents
+    - Include specific terms you expect to find in the actual documents
+    - Remove conversational filler words
+    - If the query mentions a location or entity, translate it to the formal term used in the documents
+    - Keep it as a natural sentence, not just keywords
+    - Do NOT answer the question - just rewrite it as a search query
+
+    Original query: "{user_input}"
+    Document datatype: {datatype}
+
+    Rewritten query:"""
+    
+    try:
+        response = cheap_llm.invoke([HumanMessage(content=rewrite_prompt)])
+        rewritten = extract_text(response.content).strip()
+        print(f"\n[Query Rewriter] Original: '{user_input}'")
+        print(f"[Query Rewriter] Rewritten: '{rewritten}'")
+        # Don't return an empty string - fall back to original
+        if rewritten and len(rewritten) > 5:
+            return rewritten
+    except Exception as e:
+        print(f"[Query Rewriter] Error: {e}, falling back to original query")
+    
+    return user_input
+
+
+# ==========================================
+# 5c. HARD-CODED ROUTING (The "Stop" Button)
+# ==========================================
+
+def classify_query_intent(user_input: str) -> str:
+    """
+    Classifies whether the user query requires specific policy benefit details
+    or a general product overview.
+    
+    Returns: "specific" if the user needs detailed policy benefits/limits/exclusions
+             "general" if the user wants a product overview, marketing info, or general explanation
+    """
+    router_prompt = f"""You are a query classifier for an insurance knowledge base.
+
+    Determine if the user's query requires:
+    - "specific": The user is asking about concrete policy details like coverage limits, 
+      exclusions, deductibles, benefit amounts, terms, conditions, geographic limits, 
+      waiting periods, or any hard policy numbers/rules.
+    - "general": The user is asking for a general product overview, brochure information,
+      how something works conceptually, marketing materials, or a high-level summary.
+
+    Examples:
+    "What is my coverage limit for Asia?" -> specific
+    "Does this policy cover emergency evacuation?" -> specific
+    "Tell me about the Allianz policy" -> general
+    "What benefits are included?" -> specific
+    "How does travel insurance work?" -> general
+    "Is Bali covered under my plan?" -> specific
+    "What's the deductible for outpatient care?" -> specific
+    "Can you explain the policy to me?" -> general
+
+    User Query: "{user_input}"
+    
+    Respond with ONLY the word "specific" or "general". No other text."""
+    
+    try:
+        response = cheap_llm.invoke([HumanMessage(content=router_prompt)])
+        decision = extract_text(response.content).strip().lower()
+        # Clean up
+        decision = re.sub(r'[^a-z]', '', decision)
+        if decision in ("specific", "general"):
+            print(f"\n[Intent Router] Query: '{user_input[:50]}...' -> {decision.upper()}")
+            return decision
+    except Exception as e:
+        print(f"[Intent Router] Error: {e}, defaulting to 'specific'")
+    
+    # When in doubt, default to specific (more conservative - gets detailed docs)
+    return "specific"
+
+
+# ==========================================
+# 5d. HYBRID SEARCH (Vector + Keyword/BM25)
+# ==========================================
+
+def _supabase_keyword_search(query: str, datatype: str, tenant_id: str | None = None, k: int = 5) -> list:
+    """
+    Performs keyword/ILIKE search on the documents table via Supabase REST API.
+    This acts as the BM25-equivalent for hybrid search.
+    
+    Returns a list of dicts with 'id', 'content', 'metadata' keys.
+    """
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    # Extract meaningful keywords from the query (remove common stop words)
+    stop_words = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+                  "have", "has", "had", "do", "does", "did", "will", "would", "can",
+                  "could", "shall", "should", "may", "might", "to", "of", "in", "for",
+                  "on", "with", "at", "by", "from", "as", "into", "about", "like",
+                  "through", "after", "over", "between", "under", "my", "your", "our",
+                  "what", "how", "tell", "does", "covered", "cover", "please", "need"}
+    
+    # Get individual words, filter stop words and short words
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', query.lower())
+    keywords = [w for w in words if w not in stop_words]
+    
+    # Take the most important keywords (max 5)
+    keywords = keywords[:5]
+    
+    if not keywords:
+        return []
+    
+    # Build OR conditions for keywords (match ANY keyword = higher recall)
+    # Supabase REST syntax: or=(content.ilike.*asia*,content.ilike.*coverage*)
+    # The parentheses around the conditions are REQUIRED for correct parsing
+    keyword_conditions = f"({','.join([f'content.ilike.*{kw}*' for kw in keywords])})"
+    
+    # Build the query_url with keyword OR conditions and metadata filters
+    # In Supabase/postgREST: "or=..." handles the OR logic; separate URL params = AND logic
+    query_params = f"select=id,content,metadata&or={urllib.parse.quote(keyword_conditions)}&limit={k}"
+    
+    # Add metadata filter as separate URL parameter (AND with the OR conditions)
+    query_params += f"&metadata->>datatype.eq.{datatype}"
+    if tenant_id:
+        query_params += f"&metadata->>tenant_id.eq.{tenant_id}"
+    
+    query_url = f"{SUPABASE_URL}/rest/v1/documents?{query_params}"
+    
+    try:
+        response = requests.get(query_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"[Keyword Search] Error {response.status_code}: {response.text[:300]}")
+    except Exception as e:
+        print(f"[Keyword Search] Exception: {e}")
+    
+    return []
+
+
+def _rrf_merge(vector_results: list, keyword_results: list, k: int = 60, top_n: int = 10) -> list:
+    """
+    Reciprocal Rank Fusion (RRF) - merges two ranked result lists by their rank positions.
+    Score = 1 / (k + rank_in_list)
+    
+    Higher 'k' means less aggressive fusion. Default k=60 is standard.
+    """
+    scores = {}
+    seen_content = set()
+    
+    # Score vector results by their position
+    for rank, doc in enumerate(vector_results):
+        content = doc.page_content
+        # Use content hash as key for dedup
+        content_key = hash(content[:200])
+        if content_key not in seen_content:
+            seen_content.add(content_key)
+            scores[content_key] = {
+                "score": 1.0 / (k + rank + 1),
+                "content": content,
+                "metadata": doc.metadata,
+                "source": "vector"
+            }
+    
+    # Score keyword results by their position
+    for rank, doc in enumerate(keyword_results):
+        content = doc.get("content", "") if isinstance(doc, dict) else doc.page_content
+        content_key = hash(content[:200])
+        metadata = doc.get("metadata", {}) if isinstance(doc, dict) else doc.metadata
+        
+        if content_key in scores:
+            # Already seen by vector search - add keyword score
+            scores[content_key]["score"] += 1.0 / (k + rank + 1)
+            scores[content_key]["source"] = "hybrid"
+        else:
+            scores[content_key] = {
+                "score": 1.0 / (k + rank + 1),
+                "content": content,
+                "metadata": metadata,
+                "source": "keyword"
+            }
+    
+    # Sort by score (descending) and return top_n
+    ranked = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
+    
+    # Convert back to Document-like objects (simulating LangChain Document)
+    from langchain_core.documents import Document
+    merged = []
+    for item in ranked[:top_n]:
+        doc = Document(
+            page_content=item["content"],
+            metadata=item["metadata"]
+        )
+        merged.append(doc)
+    
+    return merged
+
+def rerank_documents(query: str, docs: list, top_n: int = 5) -> list:
+    """Reranks retrieved documents using a Cross-Encoder model."""
+    if not docs:
+        return []
+    
+    passages = [
+        {"id": idx, "text": doc.page_content, "meta": doc.metadata}
+        for idx, doc in enumerate(docs)
+    ]
+    
+    rerank_request = RerankRequest(query=query, passages=passages)
+    results = ranker.rerank(rerank_request)
+    
+    reranked_docs = []
+    for item in results[:top_n]:
+        reranked_docs.append(
+            Document(page_content=item["text"], metadata=item["meta"])
+        )
+    return reranked_docs
+
+def hybrid_retrieve(active_retriever, query: str, datatype: str, tenant_id: str | None = None, k: int = 10) -> list:
+    """
+    Hybrid search pipeline:
+    1. Vector search via retriever
+    2. Keyword search via Supabase ILIKE
+    3. Merge results with RRF
+    4. Neural Cross-Encoder Reranking
+    """
+    # Step 1: Vector search
+    print(f"\n[Hybrid Search] Running vector search for: '{query[:60]}...'")
+    vector_docs = active_retriever.invoke(query)
+    
+    # Step 2: Keyword search
+    print(f"[Hybrid Search] Running keyword search for: '{query[:60]}...'")
+    keyword_results = _supabase_keyword_search(query, datatype, tenant_id, k=k)
+    
+    # Step 3: Merge with RRF
+    merged_docs = _rrf_merge(vector_docs, keyword_results, top_n=k)
+    
+    # Step 4: 🌟 NEURAL RERANKING
+    print(f"[Hybrid Search] Reranking {len(merged_docs)} documents with Cross-Encoder...")
+    final_docs = rerank_documents(query, merged_docs, top_n=5)
+    
+    return final_docs
 
 DEFAULT_SYSTEM_MESSAGE_TEMPLATE = """
 KNOWN USER FACTS (LONG-TERM MEMORY):
@@ -519,6 +882,16 @@ def get_dynamic_system_prompt(tenant_id: str | None = None, customer_id: str | N
     template = get_tenant_system_message_template(tenant_id)
     return SystemMessage(content=template.replace("{profile_text}", profile_text))
 
+# FIX 5: Helper to strip XML tags from LLM output when XML parsing fails.
+# Prevents raw <thinking>/<reflection> blocks from leaking to end users.
+def _strip_xml_tags(text: str) -> str:
+    """Removes all XML/HTML tags from text, keeping only the content between them."""
+    # Remove <tag> and </tag> pairs, keeping inner content
+    cleaned = re.sub(r'<[^>]+>', '', text)
+    # Collapse multiple newlines into at most 2
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
+
 # ==========================================
 # 6. The Ask Agent Function
 # ==========================================
@@ -571,14 +944,24 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             # Let the AI know it was executed successfully
             final_prompt = f"The user confirmed the action. The system successfully executed the tool. Output: {tool_output}. Inform the user."
             messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
-            response_obj = llm.invoke(messages)
-            return extract_text(response_obj.content), "Tool Executed Successfully"
+            response_obj = heavy_llm.invoke(messages)
+            return {
+                "response": extract_text(response_obj.content),
+                "hitl_pending": False,
+                "tool_executed": tool_name,
+                "tool_output": tool_output,
+            }
             
         else:
             # User said anything other than yes/confirm -> Abort!
             print("\n[❌ USER ABORTED: Action cancelled.]")
             tenant_state["pending_tool_call"] = None
-            return "Action cancelled. I won't perform any changes to your policy.", "User Aborted Action"
+            return {
+                "response": "Action cancelled. I won't perform any changes to your policy.",
+                "hitl_pending": False,
+                "tool_executed": None,
+                "tool_output": "User aborted the action.",
+            }
 
     # ==========================================
     # 2. STANDARD CHAT / INTENT DETECTION FLOW
@@ -591,16 +974,43 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     
     active_retriever = retrievers.get(chosen_stream)
     if not active_retriever:
-        return f"Error: No knowledge base found for {chosen_stream}. Please upload documents first.", ""
+        return {
+            "response": f"Error: No knowledge base found for {chosen_stream}. Please upload documents first.",
+            "hitl_pending": False,
+            "tool_executed": None,
+            "tool_output": None,
+        }
         
     # Build or fetch tenant-scoped toolkits and bound LLMs for this tenant
     toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
-    active_llm = llm_with_tools_local.get(chosen_stream, llm)
+    active_llm = llm_with_tools_local.get(chosen_stream, heavy_llm)
+
+    # ==========================================
+    # IMPROVEMENT 1: QUERY REWRITING (Brain Layer)
+    # ==========================================
+    rewritten_query = rewrite_search_query(user_input, chosen_stream)
+    
+    # ==========================================
+    # IMPROVEMENT 3: HARD-CODED ROUTING (Stop Button)
+    # ==========================================
+    query_intent = classify_query_intent(user_input)
+    
+    if query_intent == "specific":
+        print(f"\n[Hard-Coded Router] Query classified as SPECIFIC - excluding general/overview documents")
+    else:
+        print(f"\n[Hard-Coded Router] Query classified as GENERAL - searching all documents")
 
     if tenant_id:
-        # Call retriever and then *strictly* enforce tenant filtering using
-        # several metadata access patterns so we don't accidentally mix tenants.
-        all_chunks = active_retriever.invoke(user_input)
+        # ==========================================
+        # IMPROVEMENT 2: HYBRID SEARCH (instead of pure vector)
+        # ==========================================
+        all_chunks = hybrid_retrieve(
+            active_retriever, 
+            rewritten_query, 
+            chosen_stream, 
+            tenant_id, 
+            k=10
+        )
 
         def chunk_tenant(chunk):
             # Try dict-style access
@@ -625,35 +1035,127 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             return None
 
         # Build list and log tenant ids for debugging
+        # ✅ FIX: Allow match if metadata tenant_id matches OR if tenant_id is missing/global
         filtered = []
         seen_tenants = set()
         for c in (all_chunks or []):
             t = chunk_tenant(c)
             seen_tenants.add(t)
-            if t == tenant_id:
+            # Match exact tenant, or allow global/empty tenant chunks if tenant matching is relaxed
+            if t == tenant_id or not t or t == "global":
                 filtered.append(c)
 
-        print(f"[DEBUG] Retrieved tenants from retriever: {seen_tenants}; keeping tenant: {tenant_id}")
+        print(f"[DEBUG] Retrieved tenants from retriever: {seen_tenants}; kept {len(filtered)} chunks for tenant: {tenant_id}")
+        
+        # ==========================================
+        # Apply hard-coded routing filter
+        # ==========================================
+        if query_intent == "specific":
+            # Filter OUT documents whose source contains keywords like 
+            # "overview", "general", "riplay", "brochure", "marketing"
+            # Keep only documents that look like benefit tables / policy schedules
+            overview_keywords = ['overview', 'general', 'riplay', 'brochure', 'marketing', 'summary']
+            before_count = len(filtered)
+            filtered = [
+                c for c in filtered 
+                if not any(kw in (c.metadata.get('source', '') if hasattr(c, 'metadata') else '').lower() 
+                          for kw in overview_keywords)
+            ]
+            after_count = len(filtered)
+            print(f"[Hard-Coded Router] Filtered {before_count - after_count} general/overview documents from results")
+        
         relevant_chunks = filtered
     else:
-        relevant_chunks = active_retriever.invoke(user_input)
+        # No tenant - use hybrid search without tenant filter
+        all_chunks = hybrid_retrieve(
+            active_retriever, 
+            rewritten_query, 
+            chosen_stream, 
+            None, 
+            k=10
+        )
+        # Apply routing filter if needed
+        if query_intent == "specific":
+            overview_keywords = ['overview', 'general', 'riplay', 'brochure', 'marketing', 'summary']
+            before_count = len(all_chunks)
+            all_chunks = [
+                c for c in all_chunks 
+                if not any(kw in (c.metadata.get('source', '') if hasattr(c, 'metadata') else '').lower() 
+                          for kw in overview_keywords)
+            ]
+            print(f"[Hard-Coded Router] Filtered {before_count - len(all_chunks)} general/overview documents from results")
+        relevant_chunks = all_chunks
+        
     context_for_ai = "\n\n".join([doc.page_content for doc in relevant_chunks])
     
+    # ==========================================
+    # 2b. CHEAP_LLM CONTEXT EXTRACTION (from advanced_prototype's extract_context_node)
+    # ==========================================
+    print("\n[cheap_llm] Extracting relevant facts from retrieved context...")
+    extraction_prompt = f"""
+    You are an advanced analyst. Read the following source materials and extract only the facts, figures, 
+    statistics, and logical claims that are directly relevant to answering the question: "{user_input}".
+    
+    CRITICAL RULES:
+    1. Do not add any analysis, speculation, or answers. 
+    2. If the source material contains a Markdown table, YOU MUST PRESERVE THE TABLE FORMAT EXACTLY in your extraction. Do not convert comparison tables into bullet points.
+    3. For standard text, synthesize the raw facts into a clean, bulleted checklist.
+    
+    Source Material:
+    {context_for_ai}
+    """
+    try:
+        extraction_response = cheap_llm.invoke([HumanMessage(content=extraction_prompt)])
+        extracted_facts = extract_text(extraction_response.content)
+        print("[cheap_llm] Context extraction complete.")
+    except Exception as e:
+        print(f"[cheap_llm] Extraction failed, falling back to raw context: {e}")
+        extracted_facts = context_for_ai
+    
+    # ==========================================
+    # 2c. HEAVY_LLM CoT GENERATION (from advanced_prototype's generate_response_node)
+    # ==========================================
+    print("\n[heavy_llm] Generating response with Chain-of-Thought & Reflection...")
+    cot_system_prompt = """
+    You are an elite research AI. Your task is to solve the user's query using only the provided facts.
+    You must format your internal thinking processes using structured XML blocks:
+    
+    <thinking>
+    Step-by-step logic, drawing lines between the facts and the user's query. Discuss potential edge cases or assumptions.
+    </thinking>
+    
+    <reflection>
+    Analyze your reasoning in the thinking block. Are there logical gaps? Are there contradictions with the factual context?
+    Did you assume something not directly stated in the context? Refine your strategy if necessary.
+    </reflection>
+    
+    <final_answer>
+    The ultimate, clear, complete, and correct output written for the user. Do not reference the XML blocks here.
+    </final_answer>
+    """
+    
+    cot_user_prompt = f"""
+    User Query: {user_input}
+    
+    Provided Facts:
+    {extracted_facts}
+    """
+    
     # UPDATED: Instruct the AI to STOP talking and call the tool when data is ready
-    turn_payload = f"""CONTEXT FROM POLICY MANUAL:
-{context_for_ai}
-
-USER REQUEST: {user_input}
-
-CRITICAL RULES FOR MULTI-STEP ACTIONS:
-1. DATA GATHERING: Find a highlight of the user's words that may refer to tasks listed. Point out the task.
-2. PARAMETER GATHERING: Ask the user for parameters according to the task you believe is being addressed.
-3. Because of the security gate, do NOT perform the tool call yet if you are just thinking. Only output the tool call when you are ready to execute.
-"""
+    turn_payload = f"""
+    
+    CRITICAL RULES FOR MULTI-STEP ACTIONS:
+    1. DATA GATHERING: Find a highlight of the user's words that may refer to tasks listed. Point out the task.
+    2. PARAMETER GATHERING: Ask the user for parameters according to the task you believe is being addressed.
+    3. Because of the security gate, do NOT perform the tool call yet if you are just thinking. Only output the tool call when you are ready to execute.
+    """
     
     # Retrieve per-tenant session history
     session_history = get_session_history(tenant_id, customer_id)
-    messages = [get_dynamic_system_prompt(tenant_id, customer_id)] + session_history.messages + [HumanMessage(content=turn_payload)]
+    messages = [get_dynamic_system_prompt(tenant_id, customer_id)] + session_history.messages + [
+        SystemMessage(content=cot_system_prompt),
+        HumanMessage(content=cot_user_prompt + turn_payload)
+    ]
     
     # Ask the model what it wants to do
     response_obj = active_llm.invoke(messages)
@@ -705,7 +1207,15 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS:
                 tool_args=tool_args,
             )
             
-            return hitl_message, context_for_ai
+            return {
+                "response": hitl_message,
+                "hitl_pending": True,
+                "hitl_action": tool_name,
+                "hitl_reason": trigger_reason,
+                "hitl_args": tool_args,
+                "tool_executed": None,
+                "tool_output": None,
+            }
         else:
             # HITL not required — execute the tool directly
             print(f"\n[HITL SKIPPED] Tool '{tool_name}' passed all HITL checks. Executing directly.")
@@ -725,48 +1235,93 @@ CRITICAL RULES FOR MULTI-STEP ACTIONS:
             # Let the AI inform the user about the result
             final_prompt = f"The system successfully executed the tool '{tool_name}'. Output: {tool_output}. Inform the user about the result."
             messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
-            response_obj = llm.invoke(messages)
-            return extract_text(response_obj.content), hitl_decision.to_dict()
+            response_obj = heavy_llm.invoke(messages)
+            return {
+                "response": extract_text(response_obj.content),
+                "hitl_pending": False,
+                "tool_executed": tool_name,
+                "tool_output": tool_output,
+            }
 
     # If it's just a general question with no tool intent, reply normally
-    raw_response = extract_text(response_obj.content)
+    full_output = extract_text(response_obj.content)
+    
+    # Extract final_answer from CoT XML blocks (like advanced_prototype does)
+    final_answer_match = re.search(r"<final_answer>(.*?)</final_answer>", full_output, re.DOTALL)
+    if final_answer_match:
+        raw_response = final_answer_match.group(1).strip()
+    else:
+        # FIX 5: If XML parsing failed (model forgot closing tags), strip all XML
+        # tags from the output so users never see raw <thinking>/<reflection> blocks.
+        raw_response = _strip_xml_tags(full_output)
+    
     session_history.add_user_message(user_input)
     session_history.add_ai_message(raw_response)
     
-    return raw_response, context_for_ai
+    return {
+        "response": raw_response,
+        "hitl_pending": False,
+        "tool_executed": None,
+        "tool_output": None,
+    }
 
 # ==========================================
-# 7. LLM-As-A-Judge Evaluation System
+# 7. RAGAS Evaluation System (Replaced custom evaluate_performance with advanced_prototype's RAGAS approach)
 # ==========================================
 def evaluate_performance(question, context, answer):
-    eval_prompt = f"""You are an impartial AI evaluation system. 
-Your task is to score the AI's response based on the provided user question and retrieved context.
+    """
+    Evaluates AI response quality using RAGAS metrics (Faithfulness, AnswerRelevancy, ContextPrecision).
+    Replaces the old LLM-as-a-judge approach with proper RAGAS evaluation from advanced_prototype.
+    """
+    scores = {}
+    try:
+        # 1. Initialize Ragas Wrappers for LangChain models
+        ragas_llm = LangchainLLMWrapper(cheap_llm)
+        ragas_embeddings = LangchainEmbeddingsWrapper(embeddings)
 
-Evaluate based on these two metrics:
-1. FAITHFULNESS (Hallucination Rate): Score 0 to 10. 
-   - 10 = The answer is entirely derived from the context. No external facts or invented rules were used.
-   - 0 = Complete hallucination. The AI invented information not present in the context.
-2. RELEVANCE: Score 0 to 10. 
-   - 10 = The final answer perfectly and directly addresses the user's question.
-   - 0 = The answer is entirely off-topic or fails to answer the question.
-
-[USER QUESTION]: {question}
-[RETRIEVED CONTEXT]: {context}
-[AI RESPONSE]: {answer}
-
-Provide your evaluation in exactly this format, with no other text:
-FAITHFULNESS: <score>
-RELEVANCE: <score>
-"""
-
-    eval_obj = llm.invoke([HumanMessage(content=eval_prompt)])
-    eval_response = extract_text(eval_obj.content)
+        # 2. Build the dataset using the modern EvaluationDataset approach
+        dataset = EvaluationDataset.from_list([{
+            "user_input": question,
+            "response": answer,
+            "retrieved_contexts": [context]
+        }])
+            
+        # 3. Use legacy metrics from ragas.metrics which accept LangChain LLMs directly
+        from ragas.metrics import Faithfulness, AnswerRelevancy, LLMContextPrecisionWithoutReference
+            
+        metrics = [
+            Faithfulness(llm=cheap_llm),
+            AnswerRelevancy(llm=cheap_llm, embeddings=embeddings),
+            LLMContextPrecisionWithoutReference(llm=cheap_llm),
+        ]
+            
+        # 4. Pass the wrappers explicitly into the evaluate function
+        eval_result = evaluate(
+            dataset=dataset,
+            metrics=metrics,
+            llm=ragas_llm,
+            embeddings=ragas_embeddings
+        )
+        
+        if hasattr(eval_result, "to_pandas"):
+            scores = eval_result.to_pandas().to_dict(orient="records")[0]
+        else:
+            scores = dict(eval_result)
+            
+        print("RAGAS Scorecard generated successfully.")
+    except Exception as e:
+        print(f"WARNING: Ragas evaluation run encountered an issue: {e}")
+        scores = {"error": str(e)}
     
-    faithfulness_match = re.search(r'FAITHFULNESS:\s*(\d+)', eval_response, re.IGNORECASE)
-    relevance_match = re.search(r'RELEVANCE:\s*(\d+)', eval_response, re.IGNORECASE)
+    # Extract individual scores for backward compatibility with the old return format
+    faithfulness_score = scores.get("faithfulness", "N/A")
+    relevance_score = scores.get("answer_relevancy", "N/A")
     
-    faithfulness_score = int(faithfulness_match.group(1)) if faithfulness_match else "N/A"
-    relevance_score = int(relevance_match.group(1)) if relevance_match else "N/A"
+    # Convert float scores to 0-10 scale for backward compatibility if they're 0-1
+    if isinstance(faithfulness_score, float) and faithfulness_score <= 1.0:
+        faithfulness_score = round(faithfulness_score * 10, 1)
+    if isinstance(relevance_score, float) and relevance_score <= 1.0:
+        relevance_score = round(relevance_score * 10, 1)
     
     return faithfulness_score, relevance_score
 
@@ -919,7 +1474,7 @@ def build_toolkits_for_tenant(tenant_id: str | None):
         toolkits_local.setdefault(datatype, []).append(langchain_tool)
 
     llm_with_tools_local = {
-        datatype: llm.bind_tools(tools) if tools else llm
+        datatype: heavy_llm.bind_tools(tools) if tools else heavy_llm
         for datatype, tools in toolkits_local.items()
     }
 
@@ -927,23 +1482,19 @@ def build_toolkits_for_tenant(tenant_id: str | None):
 
 
 def get_retrievers_for_tenant(tenant_id: str | None):
-    """Create and return retrievers scoped to a specific tenant id.
-
-    This builds per-datatype retrievers by running the preprocess flow
-    for the requested tenant. It avoids running a global preprocessing pass
-    at module import time so new uploads are associated with the correct
-    tenant id.
-    """
+    """Scans storage for each discovered datatype and runs preprocess() so any
+    PDFs that haven't been parsed/embedded yet actually get sent through
+    LlamaParse and inserted into the 'documents' vector table. preprocess()
+    already skips files that are already embedded (via check_if_embedded),
+    so this is safe to call every time - it's a no-op network check for
+    files that were already processed, and a real parse for new ones."""
     discovered = discover_datatypes(tenant_id)
-
     retrievers = {}
-    for dt in discovered:
-        try:
-            retrievers[dt] = preprocess(tenant_id=tenant_id, datatype_label=dt)
-        except Exception as e:
-            print(f"⚠️ Failed to build retriever for {dt}: {e}")
-    return retrievers
 
+    for dt in discovered:
+        retrievers[dt] = preprocess(tenant_id=tenant_id, datatype_label=dt)
+
+    return retrievers
 
 def discover_datatypes(tenant_id: str | None):
     """Discover tenant datatypes from storage folders and indexed database rows."""
