@@ -3,6 +3,7 @@ import json
 import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file
 from telemetry_sdk import get_telemetry, reset_telemetry
@@ -25,6 +26,13 @@ class ChatRequest(BaseModel):
     message: str
     tenant_id: str | None = None
     customer_id: str | None = None
+
+
+class ChatApproveRequest(BaseModel):
+    """User confirms or rejects a pending HITL tool call."""
+    tenant_id: str | None = None
+    customer_id: str | None = None
+    approve: bool = True
 
 
 class IngestRequest(BaseModel):
@@ -56,14 +64,116 @@ async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTa
 
 @app.post("/chat")
 async def chat_endpoint(data: dict):
-    user_input = data.get("message")
-    tenant_id = data.get("tenant_id")
-    customer_id = data.get("customer_id")
+    try:
+        user_input = data.get("message")
+        tenant_id = data.get("tenant_id")
+        customer_id = data.get("customer_id")
 
-    retrievers = get_retrievers_for_tenant(tenant_id)
-    response_text, context = ask_agent(user_input, retrievers, tenant_id, customer_id)
+        if not user_input:
+            return {"status": "error", "message": "No message provided"}
 
-    return {"response": response_text}
+        # Instantly builds retrievers without running heavy pipeline tasks
+        retrievers = get_retrievers_for_tenant(tenant_id)
+        result = ask_agent(user_input, retrievers, tenant_id, customer_id)
+
+        # result is now a dict with structured fields
+        return {
+            "status": "ok",
+            "response": result.get("response", ""),
+            "hitl_pending": result.get("hitl_pending", False),
+            "hitl_action": result.get("hitl_action"),
+            "hitl_reason": result.get("hitl_reason"),
+            "tool_executed": result.get("tool_executed"),
+            "tool_output": result.get("tool_output"),
+        }
+
+    except Exception as e:
+        import traceback
+        print(f"❌ BACKEND CRASH IN /chat: {str(e)}")
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/chat/approve")
+async def chat_approve_endpoint(request: ChatApproveRequest):
+    """User confirms or rejects a pending HITL tool call."""
+    try:
+        tenant_id = request.tenant_id
+        customer_id = request.customer_id
+        approve = request.approve
+
+        # Send the approval decision back through ask_agent
+        # The "message" is a special keyword that the gate check in ask_agent recognizes
+        decision_text = "yes" if approve else "no"
+        retrievers = get_retrievers_for_tenant(tenant_id)
+        result = ask_agent(decision_text, retrievers, tenant_id, customer_id)
+
+        return {
+            "status": "ok",
+            "response": result.get("response", ""),
+            "hitl_pending": result.get("hitl_pending", False),
+            "tool_executed": result.get("tool_executed"),
+            "tool_output": result.get("tool_output"),
+        }
+    except Exception as e:
+        import traceback
+        print(f"❌ BACKEND CRASH IN /chat/approve: {str(e)}")
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/chat/stream")
+async def chat_stream_endpoint(data: dict):
+    """Stream the chat response as SSE events for real-time UI updates."""
+    import asyncio
+    try:
+        user_input = data.get("message")
+        tenant_id = data.get("tenant_id")
+        customer_id = data.get("customer_id")
+
+        if not user_input:
+            return {"status": "error", "message": "No message provided"}
+
+        retrievers = get_retrievers_for_tenant(tenant_id)
+        result = ask_agent(user_input, retrievers, tenant_id, customer_id)
+
+        response_text = result.get("response", "")
+        hitl_pending = result.get("hitl_pending", False)
+
+        async def event_stream():
+            # Stream the response text character-by-character for real-time effect
+            words = response_text.split(" ")
+            for i, word in enumerate(words):
+                chunk = word + (" " if i < len(words) - 1 else "")
+                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+                await asyncio.sleep(0.02)  # ~50 chars/sec typing effect
+
+            # Send the final structured event with full metadata
+            done_event = {
+                'type': 'done',
+                'response': response_text,
+                'hitl_pending': hitl_pending,
+                'hitl_action': result.get('hitl_action'),
+                'hitl_reason': result.get('hitl_reason'),
+                'tool_executed': result.get('tool_executed'),
+                'tool_output': result.get('tool_output'),
+            }
+            yield f"data: {json.dumps(done_event)}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception as e:
+        import traceback
+        print(f"❌ BACKEND CRASH IN /chat/stream: {str(e)}")
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/knowledge/delete")
