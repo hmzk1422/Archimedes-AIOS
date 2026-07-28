@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+api/venv/
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/build
+
+# Environment variables
+frontend/.env
+api/.env
+.env
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+api/venv/
+api/__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# TypeScript
+*.tsbuildinfo
+
+# Vercel
+.vercel
