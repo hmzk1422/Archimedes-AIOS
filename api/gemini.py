@@ -70,7 +70,7 @@ if EMBEDDINGS_PROVIDER == "google":
     print("[Embeddings] Using GoogleGenerativeAIEmbeddings (cloud-native)")
     from langchain_google_genai import GoogleGenerativeAIEmbeddings
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
+        model="text-embedding-004",
         google_api_key=api_key,
     )
 else:

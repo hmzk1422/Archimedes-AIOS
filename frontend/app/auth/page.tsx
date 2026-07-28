@@ -1,10 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { createClient } from '@/utils/supabase/client';
 
-export default function AuthPage() {
+function AuthForm() {
   const [tenantName, setTenantName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -123,5 +123,13 @@ export default function AuthPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function AuthPage() {
+  return (
+    <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-background"><div className="size-8 animate-spin rounded-full border-2 border-primary border-t-transparent" /></div>}>
+      <AuthForm />
+    </Suspense>
   );
 }
