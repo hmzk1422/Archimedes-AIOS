@@ -13,6 +13,7 @@ import {
   Menu,
   X,
   BarChart3,
+  Store,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -23,6 +24,7 @@ const navLinks = [
   { label: 'Actions', href: '/actions', icon: Wrench },
   { label: 'Metrics', href: '/metrics', icon: BarChart3 },
   { label: 'Agent', href: '/agent', icon: Settings },
+  { label: 'Marketplace', href: '/marketplace', icon: Store },
 ]
 
 export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string }) {

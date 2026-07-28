@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
+import { Suspense } from 'react'
 import { Upload, Activity } from 'lucide-react'
 
 // Supabase & Actions
@@ -9,12 +10,12 @@ import { deleteAccountAction } from '@/app/actions'
 // Components
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { MetricCards } from '@/components/dashboard/metric-cards'
-import { DashboardCharts } from '@/components/dashboard/dashboard-charts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { buttonVariants } from '@/components/ui/button'
 import LogoutButton from '@/components/LogoutButton'
 import ChatInterface from '@/components/ChatInterface'
 import { PageBackground } from '@/components/page-background'
+import ChartsWrapper from '@/components/dashboard/charts-wrapper'
 
 const activity = [
   { time: '2m ago', text: 'Resolved refund request', meta: 'billing · email' },
@@ -107,7 +108,9 @@ export default async function DashboardPage() {
 
           {/* New GUI Metrics & Charts */}
           <MetricCards />
-          <DashboardCharts />
+          <Suspense fallback={null}>
+            <ChartsWrapper />
+          </Suspense>
 
           <Card>
             <CardHeader className="flex-row items-center gap-2 space-y-0">
