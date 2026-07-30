@@ -1,4 +1,5 @@
 ﻿from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
 import httpx
@@ -9,15 +10,13 @@ from dotenv import load_dotenv
 app = FastAPI(title="Unified Customer Service Gateway - Dispatcher Hub")
 load_dotenv()
 
-"""
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-"""
+
 # ==========================================
 # 1. Core Infrastructure Config
 # ==========================================
@@ -192,13 +191,13 @@ async def get_tenant_by_token(platform: str, target_token: str) -> Optional[Tena
 
             for row in rows:
                 ext = row.get("extension") or {}
-                print(f"Checking row {row.get('id')} - Extension data: {ext}") # <--- Add this
+                print(f"Checking row {row.get('id')} - Extension data: {ext}")
                 if not isinstance(ext, dict):
                     continue
 
                 connection_extension = ext.get("connection-extension") or {}
                 if not connection_extension.get("enabled"):
-                    print("Skipped: connection-extension not enabled") # <--- Add this
+                    print("Skipped: connection-extension not enabled")
                     continue
 
                 platforms_config = connection_extension.get("platforms") or {}
@@ -269,4 +268,5 @@ async def process_n8n_message(payload: N8nInboundPayload):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import uvicorn
+    uvicorn.run("extension:app", host="0.0.0.0", port=8001, reload=True)

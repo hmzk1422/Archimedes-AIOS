@@ -23,6 +23,9 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 opentelemetry-exporter-otlp-proto-grpc
 
+# HTTP client (used by extension.py)
+httpx
+
 # Environment & Utilities
 python-dotenv
 requests

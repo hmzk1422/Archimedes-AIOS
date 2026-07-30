@@ -51,3 +51,11 @@ python -m company-api
 python -m extension
 ngrok http 5678
 ```
+
+# Ports Used
+```
+npm run dev -> port 3000
+main (the AI engine) -> port 8000
+company (company side for tasks) -> port 8001
+extensions -> port 8002
+```

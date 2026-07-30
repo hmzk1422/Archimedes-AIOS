@@ -48,5 +48,5 @@ def register_claim(policy_id: str, illness: str, request: ClaimRegistration):
     return {"message": f"SUCCESS: Claim details registered in the database {policy_id} and {illness}.", "data": request.dict()}
 
 if __name__ == "__main__":
-    print("Starting Company API Simulation on port 8001...")
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    print("Starting Company API Simulation on port 8002...")
+    uvicorn.run(app, host="127.0.0.1", port=8002)
