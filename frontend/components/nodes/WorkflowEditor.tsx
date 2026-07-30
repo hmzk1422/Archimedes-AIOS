@@ -1,18 +1,20 @@
 'use client'
 
-import { useCallback, useRef, useState, useMemo, DragEvent } from 'react'
+import { useCallback, useRef, useState, useEffect, DragEvent } from 'react'
 import {
   ReactFlow,
   Background,
   Controls,
   MiniMap,
   addEdge,
-  useNodesState,
-  useEdgesState,
+  applyNodeChanges,
+  applyEdgeChanges,
   type Connection,
   type Edge,
   type Node,
   type ReactFlowInstance,
+  type OnNodesChange,
+  type OnEdgesChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Save, Loader2, Trash2, AlertCircle, GripVertical } from 'lucide-react'
@@ -37,7 +39,20 @@ function generateId(): string {
   return `node_${Math.random().toString(36).substring(2, 9)}`
 }
 
-function nodeConfigToReactFlowNode(id: string, nc: NodeConfig): Node {
+/** Map legacy handle IDs ("in"/"out") to the correct port ID from the node definition */
+function resolveHandleId(typeId: NodeTypeId, handleId: string, portType: 'input' | 'output'): string {
+  // If it's already a specific port ID (not "in" or "out"), return as-is
+  if (handleId !== 'in' && handleId !== 'out') return handleId
+
+  const def = NODE_DEFINITIONS[typeId]
+  if (!def) return handleId
+
+  // Find the first port of the matching type
+  const port = def.ports.find((p) => p.type === portType)
+  return port?.id || handleId
+}
+
+function nodeConfigToReactFlowNode(id: string, nc: NodeConfig, onConfigChange?: (nodeId: string, key: string, value: string) => void, onLabelChange?: (nodeId: string, label: string) => void): Node {
   const def = NODE_DEFINITIONS[nc.typeId]
   return {
     id,
@@ -51,6 +66,8 @@ function nodeConfigToReactFlowNode(id: string, nc: NodeConfig): Node {
       description: def?.description || '',
       category: def?.category || 'processing',
       config: nc.config,
+      onConfigChange,
+      onLabelChange,
     },
   }
 }
@@ -63,29 +80,98 @@ const defaultEdgeOptions = {
 export default function WorkflowEditor({ initialConfig, onSave, loading, status }: WorkflowEditorProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null)
-
-  const initialNodes: Node[] = useMemo(() => {
-    if (!initialConfig?.nodes) return []
-    return Object.entries(initialConfig.nodes).map(([id, nc]) =>
-      nodeConfigToReactFlowNode(id, nc)
-    )
-  }, [initialConfig])
-
-  const initialEdges: Edge[] = useMemo(() => {
-    if (!initialConfig?.edges) return []
-    return initialConfig.edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      sourceHandle: e.sourceHandle,
-      targetHandle: e.targetHandle,
-      ...defaultEdgeOptions,
-    }))
-  }, [initialConfig])
-
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
   const [masterEnabled, setMasterEnabled] = useState(initialConfig?.masterEnabled ?? true)
+  const [nodes, setNodes] = useState<Node[]>([])
+  const [edges, setEdges] = useState<Edge[]>([])
+
+  // React Flow change handlers
+  const onNodesChange: OnNodesChange = useCallback(
+    (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
+    []
+  )
+  const onEdgesChange: OnEdgesChange = useCallback(
+    (changes) => setEdges((eds) => applyEdgeChanges(changes, eds)),
+    []
+  )
+
+  // Callbacks for node config/label changes
+  const handleConfigChange = useCallback(
+    (nodeId: string, key: string, value: string) => {
+      setNodes((nds: Node[]) =>
+        nds.map((n: Node) => {
+          if (n.id !== nodeId) return n
+          const d = n.data as Record<string, unknown>
+          const currentConfig = (d.config as Record<string, string>) || {}
+          return {
+            ...n,
+            data: {
+              ...d,
+              config: { ...currentConfig, [key]: value },
+            },
+          }
+        })
+      )
+    },
+    [setNodes]
+  )
+
+  const handleLabelChange = useCallback(
+    (nodeId: string, label: string) => {
+      setNodes((nds: Node[]) =>
+        nds.map((n: Node) => {
+          if (n.id !== nodeId) return n
+          return {
+            ...n,
+            data: { ...(n.data as Record<string, unknown>), label },
+          }
+        })
+      )
+    },
+    [setNodes]
+  )
+
+  // Initialize nodes & edges from saved config (runs once on mount)
+  // We use useEffect so handleConfigChange/handleLabelChange are available
+  useEffect(() => {
+    if (!initialConfig) return
+
+    const loadedNodes: Node[] = []
+    if (initialConfig.nodes) {
+      Object.entries(initialConfig.nodes).forEach(([id, nc]) => {
+        loadedNodes.push(
+          nodeConfigToReactFlowNode(id, nc, handleConfigChange, handleLabelChange)
+        )
+      })
+    }
+    setNodes(loadedNodes)
+
+    const loadedEdges: Edge[] = []
+    if (initialConfig.edges) {
+      // Build a lookup map: nodeId → NodeTypeId for resolving legacy handle IDs
+      const nodeTypeMap: Record<string, NodeTypeId> = {}
+      if (initialConfig.nodes) {
+        Object.entries(initialConfig.nodes).forEach(([id, nc]) => {
+          nodeTypeMap[id] = nc.typeId
+        })
+      }
+
+      initialConfig.edges.forEach((e) => {
+        // Resolve legacy handle IDs to the correct port IDs
+        const sourceType = nodeTypeMap[e.source]
+        const targetType = nodeTypeMap[e.target]
+        loadedEdges.push({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: sourceType ? resolveHandleId(sourceType, e.sourceHandle || 'out', 'output') : (e.sourceHandle || 'out'),
+          targetHandle: targetType ? resolveHandleId(targetType, e.targetHandle || 'in', 'input') : (e.targetHandle || 'in'),
+          ...defaultEdgeOptions,
+        })
+      })
+    }
+    setEdges(loadedEdges)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // ^ intentionally run only on mount — initialConfig is the initial snapshot
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -135,47 +221,14 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
           description: def.description,
           category: def.category,
           config,
+          onConfigChange: handleConfigChange,
+          onLabelChange: handleLabelChange,
         },
       }
 
       setNodes((nds: Node[]) => nds.concat(newNode))
     },
-    [reactFlowInstance, setNodes]
-  )
-
-  const handleConfigChange = useCallback(
-    (nodeId: string, key: string, value: string) => {
-      setNodes((nds: Node[]) =>
-        nds.map((n: Node) => {
-          if (n.id !== nodeId) return n
-          const d = n.data as Record<string, unknown>
-          const currentConfig = (d.config as Record<string, string>) || {}
-          return {
-            ...n,
-            data: {
-              ...d,
-              config: { ...currentConfig, [key]: value },
-            },
-          }
-        })
-      )
-    },
-    [setNodes]
-  )
-
-  const handleLabelChange = useCallback(
-    (nodeId: string, label: string) => {
-      setNodes((nds: Node[]) =>
-        nds.map((n: Node) => {
-          if (n.id !== nodeId) return n
-          return {
-            ...n,
-            data: { ...(n.data as Record<string, unknown>), label },
-          }
-        })
-      )
-    },
-    [setNodes]
+    [reactFlowInstance, setNodes, handleConfigChange, handleLabelChange]
   )
 
   const removeSelected = useCallback(() => {

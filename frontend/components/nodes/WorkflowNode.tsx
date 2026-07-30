@@ -3,6 +3,8 @@
 import { memo, useCallback } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { cn } from '@/lib/utils'
+import { NODE_DEFINITIONS } from './definitions'
+import type { NodePort } from './types'
 
 export type WorkflowNodeData = {
   label: string
@@ -18,7 +20,7 @@ export type WorkflowNodeData = {
 
 function WorkflowNode({ data, selected, id }: NodeProps) {
   const d = data as unknown as WorkflowNodeData
-  const { label, color, icon, description, category, config = {}, onConfigChange, onLabelChange } = d
+  const { label, color, icon, description, category, config = {}, onConfigChange, onLabelChange, typeId } = d
 
   const handleConfig = useCallback(
     (key: string, value: string) => {
@@ -45,6 +47,13 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
     processing: 'bg-amber-500/15 text-amber-400',
     output: 'bg-emerald-500/15 text-emerald-400',
   }
+
+  // Look up the node definition to get the actual port definitions
+  const nodeDef = NODE_DEFINITIONS[typeId]
+  const ports: NodePort[] = nodeDef?.ports || []
+
+  const inputPorts = ports.filter((p) => p.type === 'input')
+  const outputPorts = ports.filter((p) => p.type === 'output')
 
   return (
     <div
@@ -97,23 +106,31 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
         )}
       </div>
 
-      {/* Handle ports */}
-      {category !== 'input' && (
+      {/* Input handles — one per input port definition */}
+      {inputPorts.map((port, index) => (
         <Handle
+          key={port.id}
           type="target"
           position={Position.Left}
-          id="in"
+          id={port.id}
+          style={{ top: `${((index + 1) / (inputPorts.length + 1)) * 100}%` }}
           className="!size-3 !border-2 !border-background !bg-blue-500"
+          title={port.label}
         />
-      )}
-      {category !== 'output' && (
+      ))}
+
+      {/* Output handles — one per output port definition */}
+      {outputPorts.map((port, index) => (
         <Handle
+          key={port.id}
           type="source"
           position={Position.Right}
-          id="out"
+          id={port.id}
+          style={{ top: `${((index + 1) / (outputPorts.length + 1)) * 100}%` }}
           className="!size-3 !border-2 !border-background !bg-emerald-500"
+          title={port.label}
         />
-      )}
+      ))}
     </div>
   )
 }

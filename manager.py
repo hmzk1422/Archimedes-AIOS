@@ -59,16 +59,20 @@ def run_app():
 
         # 2. Start API Services
         if os.path.exists(api_dir) and os.path.exists(python_path):
-            print("🐍 Starting Main API (Uvicorn)...")
-            p_main = subprocess.Popen([python_path, "-m", "uvicorn", "main:app", "--reload"], cwd=api_dir)
+            print("🐍 Starting Main API (Uvicorn on Port 8000)...")
+            p_main = subprocess.Popen([python_path, "-m", "uvicorn", "main:app", "--reload", "--port", "8000"], cwd=api_dir)
             processes.append(p_main)
 
-            print("🏢 Starting Company API...")
-            p_comp = subprocess.Popen([python_path, "-m", "company-api"], cwd=api_dir)
+            print("🏢 Starting Company API (Port 8002)...")
+            p_comp = subprocess.Popen([python_path, "company_api.py"], cwd=api_dir)
             processes.append(p_comp)
-
-            print("🔌 Starting Extension...")
-            p_ext = subprocess.Popen([python_path, "-m", "extension"], cwd=api_dir)
+            
+            # Inside manager.py
+            print("🔌 Starting Extension / Webhook Service (Port 8001)...")
+            p_ext = subprocess.Popen(
+                [python_path, "-m", "uvicorn", "extension:app", "--host", "0.0.0.0", "--port", "8001", "--reload"], 
+                cwd=api_dir
+            )
             processes.append(p_ext)
         else:
             print("⚠️ API venv not found. Did you run 'python manager.py install' first?")
