@@ -44,11 +44,19 @@ def install_packages():
     
     print("\n✅ Install complete! You can now run the app.")
 
-def run_app():
+def run_app(platform="n8n"):
     print("🚀 --- RUNNING SERVICES ---")
     processes = []
     api_dir, python_path, _ = get_venv_paths()
     frontend_dir = os.path.join(os.getcwd(), "frontend")
+
+    # Determine which port to expose based on platform
+    if platform == "activepieces":
+        ngrok_port = "8001"  # Extension service port for activepieces
+        print(f"🔀 Platform mode: ACTIVEPIECES (ngrok → port {ngrok_port})")
+    else:
+        ngrok_port = "5678"  # n8n default port
+        print(f"🔀 Platform mode: N8N (ngrok → port {ngrok_port})")
 
     try:
         # 1. Start Frontend
@@ -78,8 +86,8 @@ def run_app():
             print("⚠️ API venv not found. Did you run 'python manager.py install' first?")
 
         # 3. Start Ngrok
-        print("🌍 Starting Ngrok tunnel (port 5678)...")
-        p_ngrok = subprocess.Popen("ngrok http 5678", shell=True)
+        print(f"🌍 Starting Ngrok tunnel (port {ngrok_port})...")
+        p_ngrok = subprocess.Popen(f"ngrok http {ngrok_port}", shell=True)
         processes.append(p_ngrok)
 
         print("\n✨ All services are running! Press Ctrl+C to stop everything.")
@@ -98,10 +106,11 @@ def run_app():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Shortcut to install or run the project.")
     parser.add_argument("action", choices=["install", "run"], help="Type 'install' to download dependencies or 'run' to start servers.")
+    parser.add_argument("--platform", choices=["n8n", "activepieces"], default="n8n", help="Choose platform for ngrok tunnel: n8n (port 5678) or activepieces (port 8001)")
     
     args = parser.parse_args()
     
     if args.action == "install":
         install_packages()
     elif args.action == "run":
-        run_app()
+        run_app(args.platform)

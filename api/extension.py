@@ -267,6 +267,158 @@ async def process_activepieces_message(payload: ActivepiecesInboundPayload):
     )
 
 
+# ==========================================
+# 6. Universal Processing Endpoint for n8n
+# ==========================================
+@app.post("/n8n/process")
+async def process_n8n_message(request: dict):
+    """
+    n8n sends normalized payloads directly (not wrapped in ActivepiecesInboundPayload).
+    Expected format: { platform, token, message, customer_id }
+    """
+    try:
+        platform = str(request.get("platform", "")).lower().strip()
+        token = str(request.get("token", "")).strip()
+        message = request.get("message", {})
+        customer_id = request.get("customer_id", "")
+
+        print(f"[INFO] Received n8n {platform} message from customer {customer_id}")
+
+        if not platform or not token:
+            raise HTTPException(status_code=400, detail="Missing platform or token")
+
+        # Extract message text and customer ID using the same logic as activepieces
+        msg_text = extract_message_text(platform, message)
+        cust_id = extract_customer_id(platform, message, customer_id)
+
+        if not msg_text:
+            raise HTTPException(status_code=400, detail="No message text found in payload")
+
+        # Look up tenant
+        tenant_match = await get_tenant_by_token(platform, token)
+        if not tenant_match:
+            print(f"[WARNING] Disabled or unregistered token for {platform}: {token}")
+            raise HTTPException(status_code=404, detail="Tenant not found for this enabled platform token")
+
+        # Send to AI engine
+        ai_request_body = {
+            "message": msg_text,
+            "tenant_id": tenant_match.tenant_id,
+            "customer_id": cust_id,
+        }
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(AI_ENDPOINT_URL, json=ai_request_body, timeout=45.0)
+                response.raise_for_status()
+                ai_data = response.json()
+                ai_response_text = ai_data.get("response", "No response generated.")
+            except Exception as exc:
+                print(f"[ERROR] Failed to fetch response from AI Engine: {exc}")
+                raise HTTPException(status_code=500, detail="AI Engine Error")
+
+        print(f"[SUCCESS] AI responded for tenant {tenant_match.tenant_id}. Returning to n8n.")
+        
+        # Return the same structure as activepieces for consistency
+        return {
+            "status": "success",
+            "reply_text": ai_response_text,
+            "tenant_id": tenant_match.tenant_id,
+            "token": token,
+            "platform": platform,
+            "customer_id": cust_id,
+            "outbound": tenant_match.platform_config,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR] n8n processing failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ==========================================
+# 7. Direct Telegram Webhook Endpoint
+# ==========================================
+@app.post("/webhook/{webhook_id}/gateway/telegram/{token}")
+async def telegram_webhook_handler(webhook_id: str, token: str, request: dict):
+    """
+    Direct Telegram webhook handler for when n8n is not running.
+    Telegram sends updates directly to this endpoint via ngrok.
+    Path matches n8n webhook pattern: /webhook/{webhook_id}/gateway/telegram/{token}
+    """
+    try:
+        print(f"[INFO] Received Telegram webhook (webhook_id={webhook_id})")
+        
+        # Extract message from Telegram update
+        message = request.get("message") or request.get("edited_message") or {}
+        msg_text = extract_message_text("telegram", message)
+        customer_id = extract_customer_id("telegram", message, None)
+        
+        if not msg_text:
+            print("[INFO] No message text in Telegram update, ignoring")
+            return {"status": "ok", "message": "No message text"}
+        
+        print(f"[INFO] Telegram message from {customer_id}: {msg_text[:50]}...")
+        
+        # Look up tenant by token
+        tenant_match = await get_tenant_by_token("telegram", token)
+        if not tenant_match:
+            print(f"[WARNING] Invalid telegram token: {token}")
+            raise HTTPException(status_code=404, detail="Invalid token")
+        
+        # Send to AI engine
+        ai_request_body = {
+            "message": msg_text,
+            "tenant_id": tenant_match.tenant_id,
+            "customer_id": customer_id,
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(AI_ENDPOINT_URL, json=ai_request_body, timeout=45.0)
+                response.raise_for_status()
+                ai_data = response.json()
+                ai_response_text = ai_data.get("response", "No response generated.")
+            except Exception as exc:
+                print(f"[ERROR] Failed to fetch response from AI Engine: {exc}")
+                raise HTTPException(status_code=500, detail="AI Engine Error")
+        
+        # Send reply back to Telegram
+        bot_token = os.getenv("TELEGRAM_TOKEN", token)
+        chat_id = customer_id
+        
+        telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        telegram_payload = {
+            "chat_id": chat_id,
+            "text": ai_response_text,
+            "parse_mode": "HTML",
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                telegram_response = await client.post(telegram_api_url, json=telegram_payload, timeout=10.0)
+                telegram_response.raise_for_status()
+                print(f"[SUCCESS] Replied to Telegram user {customer_id}")
+            except Exception as exc:
+                print(f"[ERROR] Failed to send Telegram reply: {exc}")
+                # Don't fail the whole request if reply fails
+        
+        return {
+            "status": "success",
+            "reply_text": ai_response_text,
+            "tenant_id": tenant_match.tenant_id,
+            "platform": "telegram",
+            "customer_id": customer_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[ERROR] Telegram webhook processing failed: {exc}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("extension:app", host="0.0.0.0", port=8001, reload=True)
