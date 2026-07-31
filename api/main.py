@@ -333,37 +333,41 @@ async def save_hitl_config(request: HITLConfigRequest):
             if rows:
                 existing_id = rows[0].get("id")
 
-        # Build the payload — merge settings into existing data if present
-        payload = {
-            "data": {
-                "settings": request.settings
-            }
-        }
-
         if existing_id:
             # Update the existing row
-            update_url = f"{rest_url}?id=eq.{existing_id}"
-            # First fetch existing data to merge
+            # First fetch existing data to merge — this preserves task definitions
+            # that are stored in the same row alongside HITL settings.
             fetch_response = requests.get(
                 f"{rest_url}?id=eq.{existing_id}&select=data",
                 headers=headers,
                 timeout=10,
             )
+            existing_data = {}
             if fetch_response.status_code == 200:
                 existing_rows = fetch_response.json()
                 if existing_rows:
-                    existing_data = existing_rows[0].get("data", {})
-                    if isinstance(existing_data, str):
+                    raw = existing_rows[0].get("data", {})
+                    if isinstance(raw, str):
                         try:
-                            existing_data = json.loads(existing_data)
+                            existing_data = json.loads(raw)
                         except json.JSONDecodeError:
                             existing_data = {}
-                    if isinstance(existing_data, dict):
-                        # Merge settings into existing data
-                        existing_data["settings"] = request.settings
-                        payload["data"] = existing_data
+                    elif isinstance(raw, dict):
+                        existing_data = raw
 
-            response = requests.patch(update_url, json=payload, headers=headers, timeout=10)
+            # Merge HITL settings into the existing data, preserving everything else
+            if isinstance(existing_data, dict):
+                existing_data["settings"] = request.settings
+            else:
+                existing_data = {"settings": request.settings}
+
+            payload = {"data": existing_data}
+            response = requests.patch(
+                f"{rest_url}?id=eq.{existing_id}",
+                json=payload,
+                headers=headers,
+                timeout=10,
+            )
         else:
             # Insert a new row
             payload.update({
