@@ -75,7 +75,9 @@ export function SiteHeader() {
           </nav>
           <div className="mt-4 flex flex-col gap-2">
             <Button variant="ghost" className="justify-center">
-              Sign in
+              <Link href="/auth" className="w-full">
+                Sign in
+              </Link>
             </Button>
             <Button className="justify-center bg-primary text-primary-foreground hover:bg-primary/90">
               Get started
