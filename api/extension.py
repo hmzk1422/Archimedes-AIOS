@@ -36,7 +36,7 @@ TOKEN_FIELD_BY_PLATFORM = {
 # ==========================================
 # 2. Schemas
 # ==========================================
-class N8nInboundPayload(BaseModel):
+class ActivepiecesInboundPayload(BaseModel):
     platform: str
     token: str
     message: Any = Field(default_factory=dict)
@@ -221,10 +221,10 @@ async def get_tenant_by_token(platform: str, target_token: str) -> Optional[Tena
 
 
 # ==========================================
-# 5. Universal Processing Endpoint for n8n
+# 5. Universal Processing Endpoint for Activepieces
 # ==========================================
-@app.post("/n8n/process", response_model=DispatcherResponse)
-async def process_n8n_message(payload: N8nInboundPayload):
+@app.post("/activepieces/process", response_model=DispatcherResponse)
+async def process_activepieces_message(payload: ActivepiecesInboundPayload):
     platform = payload.platform.lower().strip()
     cust_id = extract_customer_id(platform, payload.message, payload.customer_id)
     msg_text = extract_message_text(platform, payload.message)
@@ -255,7 +255,7 @@ async def process_n8n_message(payload: N8nInboundPayload):
             print(f"[ERROR] Failed to fetch response from AI Engine: {exc}")
             raise HTTPException(status_code=500, detail="AI Engine Error")
 
-    print(f"[SUCCESS] AI responded for tenant {tenant_match.tenant_id}. Returning to n8n.")
+    print(f"[SUCCESS] AI responded for tenant {tenant_match.tenant_id}. Returning to Activepieces.")
     return DispatcherResponse(
         status="success",
         reply_text=ai_response_text,

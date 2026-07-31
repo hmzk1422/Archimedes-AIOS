@@ -983,7 +983,10 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
         
     # Build or fetch tenant-scoped toolkits and bound LLMs for this tenant
     toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
-    active_llm = llm_with_tools_local.get(chosen_stream, heavy_llm)
+    # Try to get the LLM bound to the specific datatype's tools first.
+    # If no tools match that datatype, fall back to the combined '_all' tools.
+    # If no tools exist at all, use the plain heavy_llm.
+    active_llm = llm_with_tools_local.get(chosen_stream) or llm_with_tools_local.get("_all", heavy_llm)
 
     # ==========================================
     # IMPROVEMENT 1: QUERY REWRITING (Brain Layer)
@@ -1477,6 +1480,16 @@ def build_toolkits_for_tenant(tenant_id: str | None):
         datatype: heavy_llm.bind_tools(tools) if tools else heavy_llm
         for datatype, tools in toolkits_local.items()
     }
+
+    # IMPORTANT: Add a combined '_all' key that binds ALL available tools.
+    # This ensures the AI can call any tool regardless of which knowledge base
+    # datatype the routing selected. Without this, if the task's datatype doesn't
+    # match the knowledge base stream (e.g., tasks have datatype="ADMINISTRATION"
+    # but documents use datatype="policies"), the LLM would have zero tools bound.
+    all_tools = []
+    for tools in toolkits_local.values():
+        all_tools.extend(tools)
+    llm_with_tools_local["_all"] = heavy_llm.bind_tools(all_tools) if all_tools else heavy_llm
 
     return toolkits_local, llm_with_tools_local
 

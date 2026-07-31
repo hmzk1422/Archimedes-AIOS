@@ -134,12 +134,33 @@ export default function TasksPage() {
     }
 
     try {
-      const payload = { tasks: updatedTasks }
-
       if (rowId) {
+        // IMPORTANT: Fetch existing data first to preserve HITL settings
+        // that are stored in the same row alongside task definitions.
+        const { data: existingRow } = await supabase
+          .from(TABLE_NAME)
+          .select('data')
+          .eq('id', rowId)
+          .single()
+
+        let mergedData: Record<string, unknown> = { tasks: updatedTasks }
+        if (existingRow?.data) {
+          let raw = existingRow.data
+          if (typeof raw === 'string') {
+            try { raw = JSON.parse(raw) } catch {}
+          }
+          if (typeof raw === 'object' && raw !== null) {
+            // Preserve HITL settings that were saved separately
+            const existing = raw as Record<string, unknown>
+            if (existing.settings) {
+              mergedData.settings = existing.settings
+            }
+          }
+        }
+
         const { error } = await supabase
           .from(TABLE_NAME)
-          .update({ data: payload })
+          .update({ data: mergedData })
           .eq('id', rowId)
         if (error) throw error
       } else {
@@ -148,7 +169,7 @@ export default function TasksPage() {
           .insert([{
             datatype: 'tasks',
             filename: 'tasks',
-            data: payload,
+            data: { tasks: updatedTasks },
             tenant_id: user.id
           }])
           .select('id')
