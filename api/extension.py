@@ -223,6 +223,103 @@ async def get_tenant_by_token(platform: str, target_token: str) -> Optional[Tena
 # ==========================================
 # 5. Universal Processing Endpoint for Activepieces
 # ==========================================
+# ==========================================
+# 5a. Fetch Activepieces Pieces Catalog
+# ==========================================
+@app.get("/activepieces/pieces")
+async def get_activepieces_pieces():
+    """Fetch all available pieces from Activepieces installation."""
+    try:
+        # Activepieces internal API endpoint
+        activepieces_url = os.getenv("ACTIVEPIECES_URL", "http://localhost:3001")
+        
+        async with httpx.AsyncClient() as client:
+            # Try to fetch pieces from Activepieces API
+            response = await client.get(
+                f"{activepieces_url}/api/v1/pieces",
+                headers={"Content-Type": "application/json"},
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                pieces = response.json()
+                return {"status": "ok", "pieces": pieces}
+            else:
+                # Fallback: return curated list of common Activepieces pieces
+                return {
+                    "status": "ok",
+                    "pieces": get_fallback_activepieces_pieces(),
+                    "note": "Using fallback catalog - Activepieces API not reachable"
+                }
+    except Exception as e:
+        print(f"[WARNING] Could not fetch Activepieces pieces: {e}")
+        return {
+            "status": "ok",
+            "pieces": get_fallback_activepieces_pieces(),
+            "note": f"Using fallback catalog - {str(e)}"
+        }
+
+
+def get_fallback_activepieces_pieces():
+    """Fallback catalog of common Activepieces pieces if API is not available."""
+    return [
+        # Triggers
+        {"name": "Telegram Trigger", "type": "telegram", "category": "trigger", "icon": "✈️", "color": "#229ED9"},
+        {"name": "WhatsApp Trigger", "type": "whatsapp", "category": "trigger", "icon": "💬", "color": "#25D366"},
+        {"name": "Webhook Trigger", "type": "webhook", "category": "trigger", "icon": "🔗", "color": "#8B5CF6"},
+        {"name": "Email Trigger", "type": "email_trigger", "category": "trigger", "icon": "📧", "color": "#EA580C"},
+        {"name": "Schedule Trigger", "type": "schedule", "category": "trigger", "icon": "⏰", "color": "#F59E0B"},
+        {"name": "HTTP Request Trigger", "type": "http_trigger", "category": "trigger", "icon": "🌐", "color": "#3B82F6"},
+        {"name": "Slack Trigger", "type": "slack_trigger", "category": "trigger", "icon": "💼", "color": "#4A154B"},
+        {"name": "Discord Trigger", "type": "discord_trigger", "category": "trigger", "icon": "🎮", "color": "#5865F2"},
+        {"name": "GitHub Trigger", "type": "github_trigger", "category": "trigger", "icon": "🐙", "color": "#181717"},
+        {"name": "Stripe Trigger", "type": "stripe_trigger", "category": "trigger", "icon": "💳", "color": "#635BFF"},
+        
+        # AI & Logic
+        {"name": "AI Agent", "type": "ai_agent", "category": "ai", "icon": "🤖", "color": "#EAB308"},
+        {"name": "HITL Gate", "type": "hitl_gate", "category": "ai", "icon": "👤", "color": "#EF4444"},
+        {"name": "Transform", "type": "transform", "category": "logic", "icon": "🔄", "color": "#A855F7"},
+        {"name": "Condition", "type": "condition", "category": "logic", "icon": "🔀", "color": "#06B6D4"},
+        {"name": "Code", "type": "code", "category": "logic", "icon": "💻", "color": "#6366F1"},
+        {"name": "Loop", "type": "loop", "category": "logic", "icon": "🔁", "color": "#EC4899"},
+        {"name": "Delay", "type": "delay", "category": "logic", "icon": "⏱️", "color": "#6B7280"},
+        {"name": "Router", "type": "router", "category": "logic", "icon": "🔀", "color": "#F97316"},
+        
+        # Actions
+        {"name": "Send Email", "type": "send_email", "category": "action", "icon": "📧", "color": "#EA580C"},
+        {"name": "HTTP Request", "type": "http_request", "category": "action", "icon": "📡", "color": "#6366F1"},
+        {"name": "Database", "type": "database", "category": "action", "icon": "🗄️", "color": "#3ECF8E"},
+        {"name": "Slack Send", "type": "slack_send", "category": "action", "icon": "💼", "color": "#4A154B"},
+        {"name": "Telegram Send", "type": "telegram_send", "category": "action", "icon": "✈️", "color": "#229ED9"},
+        {"name": "WhatsApp Send", "type": "whatsapp_send", "category": "action", "icon": "💬", "color": "#25D366"},
+        {"name": "Discord Send", "type": "discord_send", "category": "action", "icon": "🎮", "color": "#5865F2"},
+        {"name": "GitHub Action", "type": "github_action", "category": "action", "icon": "🐙", "color": "#181717"},
+        {"name": "Stripe Action", "type": "stripe_action", "category": "action", "icon": "💳", "color": "#635BFF"},
+        {"name": "Google Sheets", "type": "google_sheets", "category": "action", "icon": "📊", "color": "#34A853"},
+        {"name": "Notion", "type": "notion", "category": "action", "icon": "📝", "color": "#000000"},
+        {"name": "Airtable", "type": "airtable", "category": "action", "icon": "📋", "color": "#18BFFF"},
+        {"name": "Supabase", "type": "supabase", "category": "action", "icon": "🗄️", "color": "#3ECF8E"},
+        {"name": "PostgreSQL", "type": "postgresql", "category": "action", "icon": "🐘", "color": "#4169E1"},
+        {"name": "MySQL", "type": "mysql", "category": "action", "icon": "🐬", "color": "#4479A7"},
+        {"name": "Redis", "type": "redis", "category": "action", "icon": "🔴", "color": "#DC382D"},
+        {"name": "AWS S3", "type": "aws_s3", "category": "action", "icon": "☁️", "color": "#FF9900"},
+        {"name": "Twilio", "type": "twilio", "category": "action", "icon": "📞", "color": "#F22F46"},
+        {"name": "SendGrid", "type": "sendgrid", "category": "action", "icon": "📧", "color": "#1A82F2"},
+        {"name": "Mailgun", "type": "mailgun", "category": "action", "icon": "📮", "color": "#FF6B35"},
+        {"name": "Zendesk", "type": "zendesk", "category": "action", "icon": "🏢", "color": "#03363D"},
+        {"name": "Intercom", "type": "intercom", "category": "action", "icon": "💬", "color": "#1F8DED"},
+        {"name": "HubSpot", "type": "hubspot", "category": "action", "icon": "🎯", "color": "#FF7A59"},
+        {"name": "Salesforce", "type": "salesforce", "category": "action", "icon": "☁️", "color": "#00A1E0"},
+        {"name": "Shopify", "type": "shopify", "category": "action", "icon": "🛍️", "color": "#96BF48"},
+        {"name": "WordPress", "type": "wordpress", "category": "action", "icon": "📝", "color": "#21759B"},
+        {"name": "FTP", "type": "ftp", "category": "action", "icon": "📁", "color": "#FF6B35"},
+        {"name": "SFTP", "type": "sftp", "category": "action", "icon": "🔒", "color": "#00D4AA"},
+        {"name": "Google Drive", "type": "google_drive", "category": "action", "icon": "📁", "color": "#4285F4"},
+        {"name": "Dropbox", "type": "dropbox", "category": "action", "icon": "📦", "color": "#0061FF"},
+        {"name": "OneDrive", "type": "onedrive", "category": "action", "icon": "☁️", "color": "#0078D4"},
+    ]
+
+
 @app.post("/activepieces/process", response_model=DispatcherResponse)
 async def process_activepieces_message(payload: ActivepiecesInboundPayload):
     platform = payload.platform.lower().strip()

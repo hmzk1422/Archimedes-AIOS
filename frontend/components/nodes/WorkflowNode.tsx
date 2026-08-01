@@ -36,18 +36,6 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
     [id, onLabelChange]
   )
 
-  const categoryColorMap: Record<string, string> = {
-    input: 'border-l-blue-500',
-    processing: 'border-l-amber-500',
-    output: 'border-l-emerald-500',
-  }
-
-  const categoryBadge: Record<string, string> = {
-    input: 'bg-blue-500/15 text-blue-400',
-    processing: 'bg-amber-500/15 text-amber-400',
-    output: 'bg-emerald-500/15 text-emerald-400',
-  }
-
   // Look up the node definition to get the actual port definitions
   const nodeDef = NODE_DEFINITIONS[typeId]
   const ports: NodePort[] = nodeDef?.ports || []
@@ -58,36 +46,39 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
   return (
     <div
       className={cn(
-        'min-w-[220px] rounded-xl border bg-card shadow-lg transition-shadow',
-        'border-l-4',
-        categoryColorMap[category] || 'border-l-border',
-        selected && 'ring-2 ring-ring shadow-xl'
+        'min-w-[240px] rounded-lg border-2 bg-card shadow-md transition-all duration-200',
+        'hover:shadow-lg',
+        selected ? 'ring-2 ring-primary shadow-xl scale-[1.02]' : 'shadow-sm'
       )}
+      style={{ borderColor: selected ? color : 'var(--border)' }}
     >
-      {/* Header */}
-      <div className="flex items-center gap-2 border-b border-border/50 px-3 py-2.5">
-        <span className="text-lg">{icon}</span>
-        <input
-          value={label}
-          onChange={handleLabel}
-          className="flex-1 bg-transparent text-sm font-semibold text-foreground outline-none placeholder:text-muted-foreground"
-          placeholder="Node name"
-          spellCheck={false}
-        />
-        <span
-          className={cn(
-            'rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider',
-            categoryBadge[category]
-          )}
+      {/* Header with colored accent */}
+      <div
+        className="flex items-center gap-2.5 rounded-t-md px-3 py-2.5"
+        style={{ backgroundColor: `${color}20` }}
+      >
+        <div
+          className="flex size-8 items-center justify-center rounded-md text-white shadow-sm"
+          style={{ backgroundColor: color }}
         >
-          {category}
-        </span>
+          <span className="text-base">{icon}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <input
+            value={label}
+            onChange={handleLabel}
+            className="w-full bg-transparent text-sm font-semibold text-foreground outline-none placeholder:text-muted-foreground"
+            placeholder="Node name"
+            spellCheck={false}
+          />
+          <p className="text-[10px] text-muted-foreground truncate">{description}</p>
+        </div>
       </div>
 
       {/* Config fields */}
-      <div className="space-y-2 px-3 py-2.5">
-        {Object.entries(config).length > 0 ? (
-          Object.entries(config).map(([key, value]) => (
+      {Object.keys(config).length > 0 && (
+        <div className="space-y-2 border-t border-border/50 px-3 py-2.5 bg-background/50">
+          {Object.entries(config).map(([key, value]) => (
             <div key={key} className="space-y-1">
               <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                 {key.replace(/_/g, ' ')}
@@ -95,16 +86,14 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
               <input
                 value={value}
                 onChange={(e) => handleConfig(key, e.target.value)}
-                className="w-full rounded-md border border-border/60 bg-background/50 px-2 py-1 text-xs text-foreground outline-none transition-colors focus:border-ring"
+                className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none transition-all focus:border-ring focus:ring-2 focus:ring-ring/20"
                 placeholder={`Enter ${key.replace(/_/g, ' ')}`}
                 spellCheck={false}
               />
             </div>
-          ))
-        ) : (
-          <p className="text-xs text-muted-foreground">{description}</p>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
       {/* Input handles — one per input port definition */}
       {inputPorts.map((port, index) => (
@@ -113,8 +102,14 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
           type="target"
           position={Position.Left}
           id={port.id}
-          style={{ top: `${((index + 1) / (inputPorts.length + 1)) * 100}%` }}
-          className="!size-3 !border-2 !border-background !bg-blue-500"
+          style={{
+            top: `${((index + 1) / (inputPorts.length + 1)) * 100}%`,
+            width: '10px',
+            height: '10px',
+            backgroundColor: '#3b82f6',
+            border: '2px solid var(--background)',
+            boxShadow: '0 0 0 1px #3b82f6',
+          }}
           title={port.label}
         />
       ))}
@@ -126,8 +121,14 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
           type="source"
           position={Position.Right}
           id={port.id}
-          style={{ top: `${((index + 1) / (outputPorts.length + 1)) * 100}%` }}
-          className="!size-3 !border-2 !border-background !bg-emerald-500"
+          style={{
+            top: `${((index + 1) / (outputPorts.length + 1)) * 100}%`,
+            width: '10px',
+            height: '10px',
+            backgroundColor: '#10b981',
+            border: '2px solid var(--background)',
+            boxShadow: '0 0 0 1px #10b981',
+          }}
           title={port.label}
         />
       ))}

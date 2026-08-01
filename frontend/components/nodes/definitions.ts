@@ -1,17 +1,18 @@
 import { NodeDefinition } from './types'
 
 export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
+  // Input Nodes - Triggers and Webhooks
   telegram: {
     typeId: 'telegram',
     category: 'input',
     name: 'Telegram',
-    description: 'Receive messages from a Telegram bot',
+    description: 'Receive messages from Telegram bot',
     color: '#229ED9',
     icon: '✈️',
     fields: [
       {
         key: 'telegram_token',
-        label: 'Bot API Token',
+        label: 'Bot Token',
         placeholder: '1234567890:AA...',
         type: 'password',
         required: true,
@@ -47,39 +48,6 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     defaultConfig: { whatsapp_token: '', whatsapp_phone_id: '' },
   },
 
-  zendesk: {
-    typeId: 'zendesk',
-    category: 'input',
-    name: 'Zendesk',
-    description: 'Route Zendesk ticket messages through the agent',
-    color: '#03363D',
-    icon: '🏢',
-    fields: [
-      {
-        key: 'zendesk_email',
-        label: 'Zendesk Email',
-        placeholder: 'agent@example.com',
-        type: 'email',
-        required: true,
-      },
-      {
-        key: 'zendesk_token',
-        label: 'API Token',
-        placeholder: 'Zendesk API token',
-        type: 'password',
-        required: true,
-      },
-      {
-        key: 'zendesk_subdomain',
-        label: 'Subdomain',
-        placeholder: 'your-company',
-        required: true,
-      },
-    ],
-    ports: [{ id: 'out-message', label: 'Message', type: 'output' }],
-    defaultConfig: { zendesk_email: '', zendesk_token: '', zendesk_subdomain: '' },
-  },
-
   webhook: {
     typeId: 'webhook',
     category: 'input',
@@ -105,11 +73,57 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     defaultConfig: { webhook_url: '/webhook/custom', webhook_secret: '' },
   },
 
+  email_trigger: {
+    typeId: 'email_trigger',
+    category: 'input',
+    name: 'Email Trigger',
+    description: 'Trigger workflow on incoming email',
+    color: '#EA580C',
+    icon: '📧',
+    fields: [
+      {
+        key: 'imap_host',
+        label: 'IMAP Host',
+        placeholder: 'imap.gmail.com',
+        required: true,
+      },
+      {
+        key: 'email_address',
+        label: 'Email Address',
+        placeholder: 'your@email.com',
+        type: 'email',
+        required: true,
+      },
+    ],
+    ports: [{ id: 'out-email', label: 'Email', type: 'output' }],
+    defaultConfig: { imap_host: '', email_address: '' },
+  },
+
+  schedule: {
+    typeId: 'schedule',
+    category: 'input',
+    name: 'Schedule',
+    description: 'Trigger workflow on schedule',
+    color: '#F59E0B',
+    icon: '⏰',
+    fields: [
+      {
+        key: 'cron',
+        label: 'Cron Expression',
+        placeholder: '0 9 * * *',
+        required: true,
+      },
+    ],
+    ports: [{ id: 'out-trigger', label: 'Trigger', type: 'output' }],
+    defaultConfig: { cron: '0 9 * * *' },
+  },
+
+  // Processing Nodes - AI and Logic
   'ai-agent': {
     typeId: 'ai-agent',
     category: 'processing',
     name: 'AI Agent',
-    description: 'Process messages through the AI engine',
+    description: 'Process messages through AI engine',
     color: '#EAB308',
     icon: '🤖',
     fields: [
@@ -178,7 +192,7 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     typeId: 'transform',
     category: 'processing',
     name: 'Transform',
-    description: 'Transform data with a template',
+    description: 'Transform data with template',
     color: '#A855F7',
     icon: '🔄',
     fields: [
@@ -196,6 +210,53 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     defaultConfig: { template: '' },
   },
 
+  condition: {
+    typeId: 'condition',
+    category: 'processing',
+    name: 'Condition',
+    description: 'Branch workflow based on conditions',
+    color: '#06B6D4',
+    icon: '🔀',
+    fields: [
+      {
+        key: 'condition',
+        label: 'Condition',
+        placeholder: '{{value}} > 10',
+        type: 'text',
+        required: true,
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out-true', label: 'True', type: 'output' },
+      { id: 'out-false', label: 'False', type: 'output' },
+    ],
+    defaultConfig: { condition: '' },
+  },
+
+  code: {
+    typeId: 'code',
+    category: 'processing',
+    name: 'Code',
+    description: 'Execute custom JavaScript code',
+    color: '#6366F1',
+    icon: '💻',
+    fields: [
+      {
+        key: 'code',
+        label: 'JavaScript Code',
+        placeholder: '// Your code here\nreturn data;',
+        type: 'text',
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Out', type: 'output' },
+    ],
+    defaultConfig: { code: '' },
+  },
+
+  // Output Nodes - Actions and Responses
   database: {
     typeId: 'database',
     category: 'output',
@@ -268,10 +329,62 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     ports: [{ id: 'in', label: 'In', type: 'input' }],
     defaultConfig: { status_code: '200' },
   },
+
+  slack: {
+    typeId: 'slack',
+    category: 'output',
+    name: 'Slack',
+    description: 'Send message to Slack channel',
+    color: '#4A154B',
+    icon: '💼',
+    fields: [
+      {
+        key: 'slack_token',
+        label: 'Bot Token',
+        placeholder: 'xoxb-...',
+        type: 'password',
+        required: true,
+      },
+      {
+        key: 'channel',
+        label: 'Channel',
+        placeholder: '#general',
+        required: true,
+      },
+    ],
+    ports: [{ id: 'in', label: 'In', type: 'input' }],
+    defaultConfig: { slack_token: '', channel: '' },
+  },
+
+  telegram_send: {
+    typeId: 'telegram_send',
+    category: 'output',
+    name: 'Telegram Send',
+    description: 'Send message to Telegram chat',
+    color: '#229ED9',
+    icon: '✈️',
+    fields: [
+      {
+        key: 'telegram_token',
+        label: 'Bot Token',
+        placeholder: '1234567890:AA...',
+        type: 'password',
+        required: true,
+      },
+      {
+        key: 'chat_id',
+        label: 'Chat ID',
+        placeholder: '123456789',
+        required: true,
+      },
+    ],
+    ports: [{ id: 'in', label: 'In', type: 'input' }],
+    defaultConfig: { telegram_token: '', chat_id: '' },
+  },
 }
 
 export const CATEGORY_LABELS: Record<string, string> = {
-  input: 'Input Nodes',
-  processing: 'Processing Nodes',
-  output: 'Output Nodes',
+  input: 'Triggers',
+  processing: 'Logic & AI',
+  output: 'Actions',
 }

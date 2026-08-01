@@ -17,11 +17,12 @@ import {
   type OnEdgesChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Save, Loader2, Trash2, AlertCircle, GripVertical } from 'lucide-react'
+import { Save, Loader2, Trash2, AlertCircle, GripVertical, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import WorkflowNode from './WorkflowNode'
 import { NODE_DEFINITIONS, CATEGORY_LABELS } from './definitions'
+import { useActivepiecesNodes, type NodeDefinition } from '@/hooks/useActivepiecesNodes'
 import type { NodeTypeId, FlowConfig, NodeConfig } from './types'
 
 const nodeTypes = {
@@ -41,13 +42,11 @@ function generateId(): string {
 
 /** Map legacy handle IDs ("in"/"out") to the correct port ID from the node definition */
 function resolveHandleId(typeId: NodeTypeId, handleId: string, portType: 'input' | 'output'): string {
-  // If it's already a specific port ID (not "in" or "out"), return as-is
   if (handleId !== 'in' && handleId !== 'out') return handleId
 
   const def = NODE_DEFINITIONS[typeId]
   if (!def) return handleId
 
-  // Find the first port of the matching type
   const port = def.ports.find((p) => p.type === portType)
   return port?.id || handleId
 }
@@ -73,8 +72,23 @@ function nodeConfigToReactFlowNode(id: string, nc: NodeConfig, onConfigChange?: 
 }
 
 const defaultEdgeOptions = {
-  style: { stroke: 'oklch(1 0 0 / 30%)', strokeWidth: 2 },
-  animated: true,
+  style: { stroke: 'oklch(1 0 0 / 20%)', strokeWidth: 2 },
+  animated: false,
+  type: 'smoothstep',
+}
+
+// Connection validation
+const isValidConnection = (connection: Connection): boolean => {
+  if (!connection.source || !connection.target) return false
+  if (connection.source === connection.target) return false
+
+  const sourceHandle = connection.sourceHandle || ''
+  const targetHandle = connection.targetHandle || ''
+
+  const isSourceOutput = sourceHandle.startsWith('out')
+  const isTargetInput = targetHandle.startsWith('in')
+
+  return isSourceOutput && isTargetInput
 }
 
 export default function WorkflowEditor({ initialConfig, onSave, loading, status }: WorkflowEditorProps) {
@@ -83,8 +97,27 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
   const [masterEnabled, setMasterEnabled] = useState(initialConfig?.masterEnabled ?? true)
   const [nodes, setNodes] = useState<Node[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set())
+  
+  // Load Activepieces nodes dynamically
+  const { nodeDefinitions: dynamicNodeDefinitions, loading: piecesLoading } = useActivepiecesNodes()
+  
+  // Merge hardcoded definitions with dynamic ones
+  const allNodeDefinitions = { ...NODE_DEFINITIONS, ...dynamicNodeDefinitions }
+  const allCategoryLabels = {
+    input: 'Triggers',
+    processing: 'Logic & AI',
+    output: 'Actions',
+  }
+  
+  // Initialize expanded categories when definitions load
+  useEffect(() => {
+    if (Object.keys(allNodeDefinitions).length > 0) {
+      setExpandedCategories(new Set(Object.keys(allCategoryLabels)))
+    }
+  }, [allNodeDefinitions])
 
-  // React Flow change handlers
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
     []
@@ -94,7 +127,6 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
     []
   )
 
-  // Callbacks for node config/label changes
   const handleConfigChange = useCallback(
     (nodeId: string, key: string, value: string) => {
       setNodes((nds: Node[]) =>
@@ -130,8 +162,6 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
     [setNodes]
   )
 
-  // Initialize nodes & edges from saved config (runs once on mount)
-  // We use useEffect so handleConfigChange/handleLabelChange are available
   useEffect(() => {
     if (!initialConfig) return
 
@@ -147,7 +177,6 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
 
     const loadedEdges: Edge[] = []
     if (initialConfig.edges) {
-      // Build a lookup map: nodeId → NodeTypeId for resolving legacy handle IDs
       const nodeTypeMap: Record<string, NodeTypeId> = {}
       if (initialConfig.nodes) {
         Object.entries(initialConfig.nodes).forEach(([id, nc]) => {
@@ -156,7 +185,6 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
       }
 
       initialConfig.edges.forEach((e) => {
-        // Resolve legacy handle IDs to the correct port IDs
         const sourceType = nodeTypeMap[e.source]
         const targetType = nodeTypeMap[e.target]
         loadedEdges.push({
@@ -171,12 +199,17 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
     }
     setEdges(loadedEdges)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
-  // ^ intentionally run only on mount — initialConfig is the initial snapshot
 
   const onConnect = useCallback(
     (connection: Connection) => {
+      if (!isValidConnection(connection)) return
+
       setEdges((eds: Edge[]) =>
-        addEdge({ ...connection, ...defaultEdgeOptions }, eds)
+        addEdge({ 
+          ...connection, 
+          ...defaultEdgeOptions,
+          id: `edge_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+        }, eds)
       )
     },
     [setEdges]
@@ -190,10 +223,10 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
   const onDrop = useCallback(
     (event: DragEvent) => {
       event.preventDefault()
-      const typeId = event.dataTransfer.getData('application/reactflow') as NodeTypeId
+      const typeId = event.dataTransfer.getData('application/reactflow')
       if (!typeId || !reactFlowInstance) return
 
-      const def = NODE_DEFINITIONS[typeId]
+      const def = allNodeDefinitions[typeId]
       if (!def) return
 
       const position = reactFlowInstance.screenToFlowPosition({
@@ -215,7 +248,7 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
         position,
         data: {
           label: def.name,
-          typeId: def.typeId,
+          typeId: def.typeId as NodeTypeId,
           color: def.color,
           icon: def.icon,
           description: def.description,
@@ -228,7 +261,7 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
 
       setNodes((nds: Node[]) => nds.concat(newNode))
     },
-    [reactFlowInstance, setNodes, handleConfigChange, handleLabelChange]
+    [reactFlowInstance, setNodes, handleConfigChange, handleLabelChange, allNodeDefinitions]
   )
 
   const removeSelected = useCallback(() => {
@@ -272,68 +305,145 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
     await onSave(flowConfig)
   }, [nodes, edges, masterEnabled, onSave])
 
-  const onDragStart = useCallback((event: DragEvent, typeId: NodeTypeId) => {
+  const onDragStart = useCallback((event: DragEvent, typeId: string) => {
     event.dataTransfer.setData('application/reactflow', typeId)
     event.dataTransfer.effectAllowed = 'move'
   }, [])
 
+  const toggleCategory = (category: string) => {
+    setExpandedCategories((prev) => {
+      const next = new Set(prev)
+      if (next.has(category)) {
+        next.delete(category)
+      } else {
+        next.add(category)
+      }
+      return next
+    })
+  }
+
+  const filteredNodes = Object.entries(allNodeDefinitions).filter(([_, def]) => {
+    if (!searchQuery) return true
+    const query = searchQuery.toLowerCase()
+    return (
+      def.name.toLowerCase().includes(query) ||
+      def.description.toLowerCase().includes(query)
+    )
+  })
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+          return
+        }
+        removeSelected()
+      }
+      
+      if ((event.ctrlKey || event.metaKey) && event.key === 's') {
+        event.preventDefault()
+        if (!loading) {
+          handleSave()
+        }
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [removeSelected, handleSave, loading])
+
   return (
     <div className="flex h-[600px] gap-4">
       {/* Sidebar - Draggable Node Palette */}
-      <div className="w-56 shrink-0 space-y-4 overflow-y-auto rounded-xl border bg-card p-3">
-        <div className="flex items-center justify-between">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Nodes</p>
-          <span className="text-[10px] text-muted-foreground">drag & drop</span>
+      <div className="w-64 shrink-0 flex flex-col rounded-xl border border-border bg-card shadow-sm">
+        {/* Search */}
+        <div className="p-3 border-b border-border">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-2 size-3.5 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search nodes..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full rounded-lg border border-input bg-background pl-8 pr-8 py-1.5 text-xs outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring/20"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
-        {Object.entries(CATEGORY_LABELS).map(([category, label]) => {
-          const categoryNodes = Object.values(NODE_DEFINITIONS).filter(
-            (d) => d.category === category
-          )
-          if (categoryNodes.length === 0) return null
+        {/* Node list */}
+        <div className="flex-1 overflow-y-auto p-3">
+          {Object.entries(allCategoryLabels).map(([category, label]) => {
+            const categoryNodes = filteredNodes.filter(([_, def]) => def.category === category)
+            if (categoryNodes.length === 0) return null
 
-          return (
-            <div key={category}>
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                {label}
-              </p>
-              <div className="space-y-1">
-                {categoryNodes.map((def) => (
-                  <div
-                    key={def.typeId}
-                    draggable
-                    onDragStart={(e) => onDragStart(e, def.typeId)}
-                    className="flex cursor-grab items-center gap-2 rounded-lg border border-border/50 bg-background/50 px-2 py-1.5 text-xs transition-colors hover:bg-accent/50 active:cursor-grabbing"
-                  >
-                    <GripVertical className="size-3 shrink-0 text-muted-foreground" />
-                    <span>{def.icon}</span>
-                    <span className="font-medium text-foreground">{def.name}</span>
+            const isExpanded = expandedCategories.has(category)
+
+            return (
+              <div key={category} className="mb-3">
+                <button
+                  onClick={() => toggleCategory(category)}
+                  className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent/50"
+                >
+                  <span>{label}</span>
+                  <span className="text-muted-foreground">{isExpanded ? '−' : '+'}</span>
+                </button>
+
+                {isExpanded && (
+                  <div className="mt-1 space-y-1">
+                    {categoryNodes.map(([typeId, def]) => (
+                      <div
+                        key={def.typeId}
+                        draggable
+                        onDragStart={(e) => onDragStart(e, typeId)}
+                        className="group flex cursor-grab items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-2 text-xs transition-all hover:border-muted-foreground/50 hover:shadow-sm active:cursor-grabbing"
+                      >
+                        <GripVertical className="size-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+                        <div
+                          className="flex size-6 shrink-0 items-center justify-center rounded-md text-white"
+                          style={{ backgroundColor: def.color }}
+                        >
+                          <span className="text-xs">{def.icon}</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-foreground truncate">{def.name}</p>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
-            </div>
-          )
-        })}
+            )
+          })}
+        </div>
       </div>
 
       {/* Canvas */}
-      <div className="relative flex-1">
+      <div className="relative flex-1 rounded-xl border border-border bg-background/50 shadow-sm overflow-hidden">
         {/* Toolbar */}
-        <div className="absolute left-3 top-3 z-10 flex items-center gap-2 rounded-lg border bg-card/80 p-1.5 backdrop-blur-sm">
+        <div className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-border bg-card p-1.5 shadow-sm">
           <div className="flex items-center gap-1.5 px-2">
-            <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               Gateway
             </span>
             <button
               onClick={() => setMasterEnabled(!masterEnabled)}
               className={cn(
-                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
+                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
                 masterEnabled ? 'bg-primary' : 'bg-input'
               )}
             >
               <span
                 className={cn(
-                  'pointer-events-none inline-block size-4 rounded-full bg-background shadow-sm transition-transform',
+                  'pointer-events-none inline-block size-4 rounded-full bg-background shadow-sm transition-transform duration-200',
                   masterEnabled ? 'translate-x-4' : 'translate-x-0'
                 )}
               />
@@ -348,12 +458,13 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
             onClick={removeSelected}
             disabled={!nodes.some((n: Node) => n.selected)}
             title="Delete selected"
+            className="hover:bg-accent/50"
           >
-            <Trash2 className="size-3.5" />
+            <Trash2 className="size-3.5 text-foreground" />
           </Button>
-          <Button variant="ghost" size="xs" onClick={clearAll} title="Clear all">
-            <Trash2 className="size-3.5" />
-            <span className="ml-1 text-[10px]">All</span>
+          <Button variant="ghost" size="xs" onClick={clearAll} title="Clear all" className="hover:bg-accent/50">
+            <Trash2 className="size-3.5 text-foreground" />
+            <span className="ml-1 text-[10px] text-foreground">All</span>
           </Button>
 
           <div className="h-5 w-px bg-border" />
@@ -362,10 +473,10 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
             onClick={handleSave}
             disabled={loading}
             size="xs"
-            className="bg-primary text-primary-foreground hover:bg-primary/90"
+            className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm"
           >
             {loading ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-            <span className="ml-1">Save</span>
+            <span className="ml-1 text-xs">Save</span>
           </Button>
         </div>
 
@@ -373,7 +484,7 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
         {status?.message && (
           <div
             className={cn(
-              'absolute right-3 top-3 z-10 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs backdrop-blur-sm',
+              'absolute right-3 top-3 z-10 flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm backdrop-blur-sm',
               status.kind === 'success' && 'border-primary/20 bg-primary/10 text-primary',
               status.kind === 'error' && 'border-destructive/20 bg-destructive/10 text-destructive',
               status.kind === 'info' && 'border-border bg-muted text-muted-foreground'
@@ -395,17 +506,40 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
           onDragOver={onDragOver}
           nodeTypes={nodeTypes}
           fitView
+          fitViewOptions={{ padding: 0.2 }}
           deleteKeyCode={['Backspace', 'Delete']}
-          className="rounded-xl border bg-background/50"
+          className="bg-background/50"
+          defaultEdgeOptions={defaultEdgeOptions}
+          proOptions={{ hideAttribution: true }}
+          snapToGrid={true}
+          snapGrid={[15, 15]}
+          connectionLineStyle={{ stroke: 'oklch(95% 0.04 80)', strokeWidth: 2 }}
+          minZoom={0.1}
+          maxZoom={2}
         >
-          <Background color="oklch(1 0 0 / 5%)" />
-          <Controls className="!border-border !bg-card !text-foreground [&_button]:!border-border [&_button]:!bg-card [&_button]:!text-foreground" />
+          <Background color="oklch(1 0 0 / 5%)" gap={16} size={1} />
+          <Controls 
+            className="!border-border !bg-card !text-foreground [&_button]:!border-border [&_button]:!bg-card [&_button]:!text-foreground hover:[&_button]:!bg-accent/50"
+            showInteractive={false}
+          />
           <MiniMap
             className="!border-border !bg-card"
-            nodeColor="oklch(1 0 0 / 20%)"
+            nodeColor={(node) => (node.data as Record<string, unknown>)?.color as string || 'oklch(1 0 0 / 20%)'}
             maskColor="oklch(0 0 0 / 40%)"
+            style={{ height: 120, width: 200 }}
           />
         </ReactFlow>
+
+        {/* Empty state */}
+        {nodes.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="text-center">
+              <div className="mb-2 text-4xl">🎯</div>
+              <p className="text-sm font-medium text-muted-foreground">Drag nodes here to build your workflow</p>
+              <p className="mt-1 text-xs text-muted-foreground/70">or search for a node in the sidebar</p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

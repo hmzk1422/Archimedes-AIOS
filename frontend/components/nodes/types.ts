@@ -5,12 +5,18 @@ export type NodeTypeId =
   | 'whatsapp'
   | 'zendesk'
   | 'webhook'
+  | 'email_trigger'
+  | 'schedule'
   | 'ai-agent'
   | 'hitl-gate'
   | 'transform'
+  | 'condition'
+  | 'code'
   | 'database'
   | 'email'
   | 'http-response'
+  | 'slack'
+  | 'telegram_send'
 
 export interface NodeField {
   key: string
