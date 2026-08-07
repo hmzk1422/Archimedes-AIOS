@@ -9,6 +9,7 @@ export type NodeTypeId =
   | 'schedule'
   | 'ai-agent'
   | 'hitl-gate'
+  | 'metrics'
   | 'transform'
   | 'condition'
   | 'code'
@@ -22,7 +23,7 @@ export interface NodeField {
   key: string
   label: string
   placeholder?: string
-  type?: 'text' | 'password' | 'email' | 'number' | 'select'
+  type?: 'text' | 'password' | 'email' | 'number' | 'select' | 'textarea' | 'json'
   options?: { label: string; value: string }[]
   required?: boolean
 }

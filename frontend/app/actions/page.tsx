@@ -10,7 +10,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import ExtensionPage from '@/components/dashboard/extensionpage'
-import HITLSettings from '@/components/hitl-settings'
 import { PageBackground } from '@/components/page-background'
 
 // 1. Define the exact structure based on your 6 parameters
@@ -400,11 +399,6 @@ export default function TasksPage() {
             </Card>
             <div className="lg:col-span-2">
                 <ExtensionPage />
-            </div>
-
-            {/* HITL Settings Section */}
-            <div className="lg:col-span-2 mt-8">
-              <HITLSettings />
             </div>
 
           </div>

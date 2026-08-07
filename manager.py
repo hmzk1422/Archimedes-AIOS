@@ -3,6 +3,13 @@ import sys
 import os
 import time
 import argparse
+import shutil
+
+
+def is_tool_available(name: str) -> bool:
+    """Check whether a CLI tool is available on PATH."""
+    return shutil.which(name) is not None
+
 
 def get_venv_paths():
     """Returns the correct paths to pip and python inside the venv depending on OS."""
@@ -44,6 +51,34 @@ def install_packages():
     
     print("\n✅ Install complete! You can now run the app.")
 
+def start_activepieces():
+    """
+    Start Activepieces via npx (no Docker) to avoid the Docker freeze issue.
+    Activepieces runs on port 3001 by default and uses a local SQLite + file
+    storage for dev mode.
+    """
+    print("🧩 Starting Activepieces via npx (no Docker)...")
+
+    if not is_tool_available("npx"):
+        print("⚠️ 'npx' not found on PATH. Install Node.js first (https://nodejs.org).")
+        return None
+
+    # Activepieces dev mode stores data in ./ap_data by default.
+    # We run it in the project root so the data persists alongside the project.
+    ap_env = os.environ.copy()
+    ap_env.setdefault("AP_PORT", "3001")
+    ap_env.setdefault("AP_NODE_MODE", "dev")
+
+    p_ap = subprocess.Popen(
+        "npx -y activepieces",
+        shell=True,
+        cwd=os.getcwd(),
+        env=ap_env,
+    )
+    print("✅ Activepieces starting on http://localhost:3001 (first run may take a while to download).")
+    return p_ap
+
+
 def run_app(platform="n8n"):
     print("🚀 --- RUNNING SERVICES ---")
     processes = []
@@ -59,6 +94,15 @@ def run_app(platform="n8n"):
         print(f"🔀 Platform mode: N8N (ngrok → port {ngrok_port})")
 
     try:
+        # 0. Start Activepieces (only in activepieces mode, no Docker)
+        if platform == "activepieces":
+            p_ap = start_activepieces()
+            if p_ap:
+                processes.append(p_ap)
+                # Give Activepieces a moment to boot before we start ngrok
+                print("⏳ Waiting 10s for Activepieces to initialize...")
+                time.sleep(10)
+
         # 1. Start Frontend
         if os.path.exists(frontend_dir):
             print("🌐 Starting Frontend (npm run dev)...")
@@ -90,7 +134,17 @@ def run_app(platform="n8n"):
         p_ngrok = subprocess.Popen(f"ngrok http {ngrok_port}", shell=True)
         processes.append(p_ngrok)
 
-        print("\n✨ All services are running! Press Ctrl+C to stop everything.")
+        if platform == "activepieces":
+            print("\n✨ All services are running!")
+            print("   • Activepieces UI:  http://localhost:3001")
+            print("   • Extension API:     http://localhost:8001")
+            print("   • AI Engine:         http://localhost:8000")
+            print("   • Frontend:          http://localhost:3000")
+            print("\n   Next: open http://localhost:8001/activepieces/status to verify the connection,")
+            print("   then POST to http://localhost:8001/activepieces/deploy to push the Telegram flow.")
+            print("\nPress Ctrl+C to stop everything.")
+        else:
+            print("\n✨ All services are running! Press Ctrl+C to stop everything.")
         
         # Keep the script alive so the background processes don't close
         while True:

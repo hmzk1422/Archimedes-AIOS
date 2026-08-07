@@ -1,0 +1,113 @@
+{
+  "name": "Customer Service Gateway - Telegram Routing",
+  "description": "Receives Telegram messages, routes to Python AI engine, and sends replies back. Replaces the n8n workflow with Activepieces.",
+  "strategy": {
+    "type": "DRAFT"
+  },
+  "trigger": {
+    "name": "telegram_trigger",
+    "valid": true,
+    "settings": {
+      "auth": {
+        "type": "CUSTOM_AUTH",
+        "value": {
+          "token": "{{TELEGRAM_BOT_TOKEN}}"
+        }
+      },
+      "events": ["message"]
+    },
+    "type": "PIECE_TRIGGER",
+    "pieceName": "telegram-bot",
+    "pieceType": "TRIGGER",
+    "inputUiInfo": {
+      "selectedResource": null,
+      "selectedAction": null,
+      "customizedInputs": {}
+    }
+  },
+  "steps": [
+    {
+      "name": "normalize_payload",
+      "valid": true,
+      "settings": {
+        "language": "javascript",
+        "code": "const update = trigger.body;\nconst message = update.message || update.edited_message || {};\nconst text = message.text || message.caption || '';\nconst chatId = message.chat?.id || message.from?.id || '';\nconst fromId = message.from?.id || '';\n\nreturn {\n  platform: 'telegram',\n  token: auth.token,\n  message: update,\n  customer_id: String(chatId),\n  text: text,\n  from_id: String(fromId)\n};"
+      },
+      "type": "PIECE",
+      "pieceName": "code",
+      "pieceType": "ACTION",
+      "inputUiInfo": {
+        "selectedResource": null,
+        "selectedAction": null,
+        "customizedInputs": {}
+      }
+    },
+    {
+      "name": "call_ai_engine",
+      "valid": true,
+      "settings": {
+        "method": "POST",
+        "url": "{{AI_ENGINE_URL}}/activepieces/process",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "platform": "{{normalize_payload.platform}}",
+          "token": "{{normalize_payload.token}}",
+          "message": "{{normalize_payload.message}}",
+          "customer_id": "{{normalize_payload.customer_id}}"
+        },
+        "timeout": 45,
+        "failsafe": false
+      },
+      "type": "PIECE",
+      "pieceName": "http",
+      "pieceType": "ACTION",
+      "inputUiInfo": {
+        "selectedResource": null,
+        "selectedAction": null,
+        "customizedInputs": {}
+      }
+    },
+    {
+      "name": "send_telegram_reply",
+      "valid": true,
+      "settings": {
+        "auth": {
+          "type": "CUSTOM_AUTH",
+          "value": {
+            "token": "{{TELEGRAM_BOT_TOKEN}}"
+          }
+        },
+        "chatId": "{{call_ai_engine.customer_id}}",
+        "text": "{{call_ai_engine.reply_text}}",
+        "parseMode": "HTML"
+      },
+      "type": "PIECE",
+      "pieceName": "telegram-bot",
+      "pieceType": "ACTION",
+      "inputUiInfo": {
+        "selectedResource": null,
+        "selectedAction": null,
+        "customizedInputs": {}
+      }
+    }
+  ],
+  "connections": {
+    "telegram_trigger": {
+      "next": {
+        "action": "normalize_payload"
+      }
+    },
+    "normalize_payload": {
+      "next": {
+        "action": "call_ai_engine"
+      }
+    },
+    "call_ai_engine": {
+      "next": {
+        "action": "send_telegram_reply"
+      }
+    }
+  }
+}

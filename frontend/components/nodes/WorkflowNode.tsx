@@ -39,6 +39,7 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
   // Look up the node definition to get the actual port definitions
   const nodeDef = NODE_DEFINITIONS[typeId]
   const ports: NodePort[] = nodeDef?.ports || []
+  const fields = nodeDef?.fields || []
 
   const inputPorts = ports.filter((p) => p.type === 'input')
   const outputPorts = ports.filter((p) => p.type === 'output')
@@ -78,20 +79,88 @@ function WorkflowNode({ data, selected, id }: NodeProps) {
       {/* Config fields */}
       {Object.keys(config).length > 0 && (
         <div className="space-y-2 border-t border-border/50 px-3 py-2.5 bg-background/50">
-          {Object.entries(config).map(([key, value]) => (
-            <div key={key} className="space-y-1">
-              <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                {key.replace(/_/g, ' ')}
-              </label>
-              <input
-                value={value}
-                onChange={(e) => handleConfig(key, e.target.value)}
-                className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none transition-all focus:border-ring focus:ring-2 focus:ring-ring/20"
-                placeholder={`Enter ${key.replace(/_/g, ' ')}`}
-                spellCheck={false}
-              />
-            </div>
-          ))}
+          {Object.entries(config).map(([key, value]) => {
+            const fieldDef = fields.find((f) => f.key === key)
+            const fieldType = fieldDef?.type || 'text'
+            const fieldLabel = fieldDef?.label || key.replace(/_/g, ' ')
+            const fieldPlaceholder = fieldDef?.placeholder || `Enter ${key.replace(/_/g, ' ')}`
+
+            // Select field
+            if (fieldType === 'select' && fieldDef?.options) {
+              return (
+                <div key={key} className="space-y-1">
+                  <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    {fieldLabel}
+                  </label>
+                  <select
+                    value={value}
+                    onChange={(e) => handleConfig(key, e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none transition-all focus:border-ring focus:ring-2 focus:ring-ring/20"
+                  >
+                    {fieldDef.options.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )
+            }
+
+            // Textarea / JSON field
+            if (fieldType === 'textarea' || fieldType === 'json') {
+              return (
+                <div key={key} className="space-y-1">
+                  <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    {fieldLabel}
+                  </label>
+                  <textarea
+                    value={value}
+                    onChange={(e) => handleConfig(key, e.target.value)}
+                    className="w-full min-h-[60px] rounded-md border border-input bg-background px-2 py-1.5 text-xs font-mono text-foreground outline-none transition-all focus:border-ring focus:ring-2 focus:ring-ring/20 resize-y"
+                    placeholder={fieldPlaceholder}
+                    spellCheck={false}
+                  />
+                </div>
+              )
+            }
+
+            // Password field
+            if (fieldType === 'password') {
+              return (
+                <div key={key} className="space-y-1">
+                  <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    {fieldLabel}
+                  </label>
+                  <input
+                    type="password"
+                    value={value}
+                    onChange={(e) => handleConfig(key, e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none transition-all focus:border-ring focus:ring-2 focus:ring-ring/20"
+                    placeholder={fieldPlaceholder}
+                    spellCheck={false}
+                  />
+                </div>
+              )
+            }
+
+            // Default text/number/email input
+            return (
+              <div key={key} className="space-y-1">
+                <label className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  {fieldLabel}
+                </label>
+                <input
+                  type={fieldType === 'number' ? 'number' : fieldType === 'email' ? 'email' : 'text'}
+                  value={value}
+                  onChange={(e) => handleConfig(key, e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs text-foreground outline-none transition-all focus:border-ring focus:ring-2 focus:ring-ring/20"
+                  placeholder={fieldPlaceholder}
+                  spellCheck={false}
+                />
+              </div>
+            )
+          })}
         </div>
       )}
 
