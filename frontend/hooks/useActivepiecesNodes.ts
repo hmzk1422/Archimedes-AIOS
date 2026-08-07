@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { NODE_DEFINITIONS } from '@/components/nodes/definitions'
+import type { NodeField, NodePort } from '@/components/nodes/types'
 
 export interface ActivepiecesPiece {
   name: string
@@ -18,19 +19,8 @@ export interface NodeDefinition {
   description: string
   color: string
   icon: string
-  fields: Array<{
-    key: string
-    label: string
-    placeholder?: string
-    type?: 'text' | 'password' | 'email' | 'number' | 'select'
-    options?: { label: string; value: string }[]
-    required?: boolean
-  }>
-  ports: Array<{
-    id: string
-    label: string
-    type: 'input' | 'output'
-  }>
+  fields: NodeField[]
+  ports: NodePort[]
   defaultConfig?: Record<string, unknown>
 }
 
@@ -57,6 +47,7 @@ const FALLBACK_PIECES: ActivepiecesPiece[] = [
   // AI & Logic
   { name: 'AI Agent', type: 'ai_agent', category: 'ai', icon: '🤖', color: '#EAB308' },
   { name: 'HITL Gate', type: 'hitl_gate', category: 'ai', icon: '👤', color: '#EF4444' },
+  { name: 'Metrics', type: 'metrics', category: 'ai', icon: '📊', color: '#3B82F6' },
   { name: 'Transform', type: 'transform', category: 'logic', icon: '🔄', color: '#A855F7' },
   { name: 'Condition', type: 'condition', category: 'logic', icon: '🔀', color: '#06B6D4' },
   { name: 'Code', type: 'code', category: 'logic', icon: '💻', color: '#6366F1' },
@@ -149,9 +140,35 @@ export function useActivepiecesNodes() {
       const category = CATEGORY_MAP[piece.category] || 'processing'
       
       // Determine ports based on category
-      let ports: Array<{ id: string; label: string; type: 'input' | 'output' }> = []
+      let ports: NodePort[] = []
       if (category === 'input') {
         ports = [{ id: 'out', label: 'Output', type: 'output' }]
       } else if (category === 'output') {
         ports = [{ id: 'in', label: 'Input', type: 'input' }]
       } else {
+        ports = [
+          { id: 'in', label: 'Input', type: 'input' },
+          { id: 'out', label: 'Output', type: 'output' },
+        ]
+      }
+
+      definitions[typeId] = {
+        typeId,
+        category,
+        name: piece.name,
+        description: `${piece.name} node`,
+        color: piece.color,
+        icon: piece.icon,
+        fields: [],
+        ports,
+        defaultConfig: {},
+      }
+    })
+
+    return definitions
+  }, [pieces])
+
+  const nodeDefinitions = getNodeDefinitions()
+
+  return { nodeDefinitions, loading, error }
+}

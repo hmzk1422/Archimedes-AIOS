@@ -1,19 +1,18 @@
-import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { Suspense } from 'react'
-import { Upload, Activity } from 'lucide-react'
+import { Activity } from 'lucide-react'
 
-// Supabase & Actions
+// Supabase
 import { createClient } from '@/utils/supabase/server'
-import { deleteAccountAction } from '@/app/actions'
+
+// RBAC
+import { getAuthUser } from '@/lib/rbac-server'
+import { RoleBadge } from '@/components/rbac/RoleBadge'
 
 // Components
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { MetricCards } from '@/components/dashboard/metric-cards'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { buttonVariants } from '@/components/ui/button'
-import LogoutButton from '@/components/LogoutButton'
-import ChatInterface from '@/components/ChatInterface'
 import { PageBackground } from '@/components/page-background'
 import ChartsWrapper from '@/components/dashboard/charts-wrapper'
 
@@ -26,15 +25,15 @@ const activity = [
 ]
 
 export default async function DashboardPage() {
+  const authUser = await getAuthUser()
+
+  if (!authUser) redirect('/auth')
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) redirect('/auth')
-
   const { data: profile } = await supabase
     .from('profiles')
     .select('tenant_name, email, created_at')
-    .eq('id', user.id)
+    .eq('id', authUser.id)
     .single()
 
   const tenantName = profile?.tenant_name ?? 'there'
@@ -57,29 +56,6 @@ export default async function DashboardPage() {
               Here&apos;s how your support agent is performing across every channel.
             </p>
           </div>
-
-          {/* Integrated Actions: Delete, Logout, and Upload */}
-          <div className="flex items-center gap-4">
-            <form action={deleteAccountAction}>
-              <button 
-                type="submit"   
-                className="text-xs text-red-500 hover:text-red-700 font-medium transition-colors"
-              >
-                Delete Account
-              </button>
-            </form>
-            <LogoutButton />
-            <Link
-              href="/upload"
-              className={buttonVariants({
-                size: 'lg',
-                className: 'bg-primary text-primary-foreground hover:bg-primary/90 hidden sm:flex',
-              })}
-            >
-              <Upload className="mr-2 size-4" />
-              Upload knowledge
-            </Link>
-          </div>
         </div>
 
         <div className="mt-8 space-y-4">
@@ -87,8 +63,14 @@ export default async function DashboardPage() {
           {/* Integrated Tenant Details Grid */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
             <div className="p-5 bg-card border border-border rounded-lg shadow-sm">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-widest mb-1">Role</p>
+              <div className="mt-1">
+                <RoleBadge role={authUser.role} size="md" />
+              </div>
+            </div>
+            <div className="p-5 bg-card border border-border rounded-lg shadow-sm">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-widest mb-1">Tenant ID</p>
-              <p className="text-sm font-semibold text-foreground truncate">{user.id}</p>
+              <p className="text-sm font-semibold text-foreground truncate">{authUser.id}</p>
             </div>
             <div className="p-5 bg-card border border-border rounded-lg shadow-sm">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-widest mb-1">Tenant Name</p>

@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useRef, useState, useEffect, DragEvent } from 'react'
+import { useCallback, useRef, useState, useEffect, DragEvent, useMemo } from 'react'
 import {
   ReactFlow,
   Background,
@@ -103,20 +103,25 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
   // Load Activepieces nodes dynamically
   const { nodeDefinitions: dynamicNodeDefinitions, loading: piecesLoading } = useActivepiecesNodes()
   
-  // Merge hardcoded definitions with dynamic ones
-  const allNodeDefinitions = { ...NODE_DEFINITIONS, ...dynamicNodeDefinitions }
+  // Merge hardcoded definitions with dynamic ones — memoize to prevent infinite re-renders
+  const allNodeDefinitions = useMemo(
+    () => ({ ...NODE_DEFINITIONS, ...dynamicNodeDefinitions }) as Record<string, NodeDefinition>,
+    [dynamicNodeDefinitions]
+  )
   const allCategoryLabels = {
     input: 'Triggers',
     processing: 'Logic & AI',
     output: 'Actions',
   }
   
-  // Initialize expanded categories when definitions load
+  // Initialize expanded categories only once when definitions first load
+  const [defsInitialized, setDefsInitialized] = useState(false)
   useEffect(() => {
-    if (Object.keys(allNodeDefinitions).length > 0) {
+    if (!defsInitialized && Object.keys(allNodeDefinitions).length > 0) {
       setExpandedCategories(new Set(Object.keys(allCategoryLabels)))
+      setDefsInitialized(true)
     }
-  }, [allNodeDefinitions])
+  }, [allNodeDefinitions, defsInitialized])
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -226,7 +231,7 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
       const typeId = event.dataTransfer.getData('application/reactflow')
       if (!typeId || !reactFlowInstance) return
 
-      const def = allNodeDefinitions[typeId]
+      const def = allNodeDefinitions[typeId] as NodeDefinition | undefined
       if (!def) return
 
       const position = reactFlowInstance.screenToFlowPosition({
@@ -325,9 +330,10 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
   const filteredNodes = Object.entries(allNodeDefinitions).filter(([_, def]) => {
     if (!searchQuery) return true
     const query = searchQuery.toLowerCase()
+    const nodeDef = def as NodeDefinition
     return (
-      def.name.toLowerCase().includes(query) ||
-      def.description.toLowerCase().includes(query)
+      nodeDef.name.toLowerCase().includes(query) ||
+      nodeDef.description.toLowerCase().includes(query)
     )
   })
 

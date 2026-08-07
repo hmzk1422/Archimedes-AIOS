@@ -20,14 +20,45 @@ Businesses today are drowning in high-volume, low-complexity support tickets tha
 - Scalable Efficiency: Built for rapid deployment in high-volume enterprise environments
 
 # Technical Guideline
+
+The platform supports two automation engines for routing Telegram (and other
+channel) messages into the AI engine:
+
+| Engine | Start command | Port | Notes |
+|--------|---------------|------|-------|
+| **n8n** | `docker run ... n8n` | 5678 | Original workflow engine |
+| **Activepieces** | `npx -y activepieces` | 3001 | No Docker required — avoids Docker freeze |
+
+> ⚠️ If `docker` freezes on your machine, use the **Activepieces** path. It runs
+> entirely via `npx` (Node.js) with local SQLite/file storage, no Docker needed.
+
 ## Installs
-**Requirements:** ngrok, docker, n8n, nodejs, python
+**Requirements:** ngrok, nodejs, python, and **either** docker+n8n **or** just nodejs (for Activepieces)
+
+### Option A — n8n (Docker)
 ```
 docker run -it --rm -p 5678:5678 -v "C:\Users\Himaska\.n8n:/home/node/.n8n" --name n8n docker.n8n.io/n8nio/n8n
 ```
+Then import `api/n8n-extension-workflow.json` into n8n.
+
+### Option B — Activepieces (no Docker, recommended if Docker freezes)
+```
+npx -y activepieces
+```
+Activepieces starts on `http://localhost:3001`. On first run it will download
+its packages; subsequent runs are faster. Data is stored locally in `./ap_data`.
 
 ## Running the Platform
-Run the following commands.
+
+### One-command launcher (manager.py)
+The easiest way to run everything is the manager script:
+```
+python manager.py install          # installs frontend + API deps
+python manager.py run --platform activepieces   # starts Activepieces + all services
+python manager.py run --platform n8n             # starts n8n-style (ngrok → 5678)
+```
+
+### Manual startup
 **Frontend**
 Go to frontend folder.
 ```
@@ -43,20 +74,55 @@ python -m venv venv
 venv\scripts\activate.ps1
 python -m pip install -r requirements.txt
 ```
-**Starting python file**
+**Starting python files**
 There are 2 files. `company-api` is the simulated third-party side communicating with our platform. `main` is our platform.
 ```
 python -m uvicorn main:app --reload
 python -m company-api
 python -m extension
-ngrok http 5678
+ngrok http 5678          # for n8n
+# OR
+ngrok http 8001          # for activepieces (extension service)
 ```
+
+## Connecting to Activepieces
+Once Activepieces is running on `http://localhost:3001` and the extension
+service is on `http://localhost:8001`:
+
+1. **Check connectivity:**
+   ```
+   curl http://localhost:8001/activepieces/status
+   ```
+2. **Deploy the Telegram routing flow** (from `api/activepieces-flow.json`):
+   ```
+   curl -X POST http://localhost:8001/activepieces/deploy -H "Content-Type: application/json" -d "{\"publish\": true}"
+   ```
+   This also upserts a Telegram bot connection using the `TELEGRAM_TOKEN` from `api/.env`.
+3. **List flows / connections:**
+   ```
+   curl http://localhost:8001/activepieces/flows
+   curl http://localhost:8001/activepieces/connections
+   ```
+4. **Enable / disable / delete a flow:**
+   ```
+   curl -X POST http://localhost:8001/activepieces/flows/<id>/enable
+   curl -X POST http://localhost:8001/activepieces/flows/<id>/disable
+   curl -X DELETE http://localhost:8001/activepieces/flows/<id>
+   ```
+
+### Activepieces environment variables (`api/.env`)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACTIVEPIECES_URL` | `http://localhost:3001` | Activepieces instance URL |
+| `ACTIVEPIECES_API_KEY` | _(empty)_ | API key from Activepieces UI (Settings → API Keys) |
+| `ACTIVEPIECES_TIMEOUT` | `15` | Request timeout in seconds |
+| `AI_ENGINE_URL` | `http://localhost:8001` | URL the Activepieces flow calls back into |
 
 # Ports Used
 ```
-npm run dev -> port 3000
-main (the AI engine) -> port 8000
-company (company side for tasks) -> port 8001
-extensions -> port 8002
-```
-
+npm run dev (frontend)        -> port 3000
+main (the AI engine)          -> port 8000
+extension (webhook/dispatch)  -> port 8001
+company (company side)        -> port 8002
+n8n (optional)                -> port 5678
+activepieces (no Docker)      -> port 3001

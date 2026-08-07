@@ -1,0 +1,22 @@
+{
+  "name": "customer-service-agent-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:ci": "playwright test --config=playwright.config.ts",
+    "test:dragdrop": "playwright test tests/drag-drop/",
+    "test:tasks": "playwright test tests/task-detection/",
+    "test:tenants": "playwright test tests/tenant-isolation/",
+    "test:nodes": "playwright test tests/node-communication/",
+    "test:coverage": "playwright test --shard=1/4",
+    "test:watch": "playwright test --watch",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.41.0",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}

@@ -152,18 +152,24 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     typeId: 'hitl-gate',
     category: 'processing',
     name: 'HITL Gate',
-    description: 'Require human approval before proceeding',
+    description: 'Require human approval based on your own rules',
     color: '#EF4444',
     icon: '👤',
     fields: [
       {
+        key: 'rules',
+        label: 'Approval Rules (JSON)',
+        placeholder: '[{"field": "amount", "op": ">", "value": 50}, {"field": "sentiment", "op": "in", "value": ["negative","angry"]}]',
+        type: 'json',
+      },
+      {
         key: 'approval_method',
         label: 'Approval Method',
-        placeholder: 'email',
+        placeholder: 'dashboard',
         type: 'select',
         options: [
-          { label: 'Email', value: 'email' },
           { label: 'Dashboard', value: 'dashboard' },
+          { label: 'Email', value: 'email' },
           { label: 'Both', value: 'both' },
         ],
       },
@@ -185,7 +191,80 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
       { id: 'out-approved', label: 'Approved', type: 'output' },
       { id: 'out-rejected', label: 'Rejected', type: 'output' },
     ],
-    defaultConfig: { approval_method: 'email', notify_email: '', timeout_minutes: '30' },
+    defaultConfig: {
+      rules: '[{"field": "amount", "op": ">", "value": 50}]',
+      approval_method: 'dashboard',
+      notify_email: '',
+      timeout_minutes: '30',
+    },
+  },
+
+  metrics: {
+    typeId: 'metrics',
+    category: 'processing',
+    name: 'Metrics',
+    description: 'Record custom metrics and evaluations from the flow',
+    color: '#3B82F6',
+    icon: '📊',
+    fields: [
+      {
+        key: 'metric_name',
+        label: 'Metric Name',
+        placeholder: 'conversation_duration_ms',
+        required: true,
+      },
+      {
+        key: 'metric_type',
+        label: 'Metric Type',
+        type: 'select',
+        options: [
+          { label: 'Counter', value: 'counter' },
+          { label: 'Gauge', value: 'gauge' },
+        ],
+      },
+      {
+        key: 'value_template',
+        label: 'Value Expression',
+        placeholder: '{{response.duration_ms}} or 1',
+        required: true,
+      },
+      {
+        key: 'tags',
+        label: 'Tags (JSON)',
+        placeholder: '{"channel": "telegram", "tier": "enterprise"}',
+        type: 'json',
+      },
+      {
+        key: 'evaluation_name',
+        label: 'Evaluation Name (optional)',
+        placeholder: 'faithfulness',
+      },
+      {
+        key: 'min_score',
+        label: 'Min Score',
+        placeholder: '0',
+        type: 'number',
+      },
+      {
+        key: 'max_score',
+        label: 'Max Score',
+        placeholder: '10',
+        type: 'number',
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Out', type: 'output' },
+    ],
+    defaultConfig: {
+      metric_name: '',
+      metric_type: 'counter',
+      value_template: '1',
+      tags: '{}',
+      evaluation_name: '',
+      min_score: '0',
+      max_score: '10',
+    },
   },
 
   transform: {

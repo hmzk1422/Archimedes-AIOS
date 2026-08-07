@@ -1,11 +1,13 @@
 ﻿from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import httpx
 import uvicorn
 import os
 from dotenv import load_dotenv
+
+from activepieces_connector import ActivepiecesConnector, get_connector
 
 app = FastAPI(title="Unified Customer Service Gateway - Dispatcher Hub")
 load_dotenv()
@@ -278,6 +280,7 @@ def get_fallback_activepieces_pieces():
         # AI & Logic
         {"name": "AI Agent", "type": "ai_agent", "category": "ai", "icon": "🤖", "color": "#EAB308"},
         {"name": "HITL Gate", "type": "hitl_gate", "category": "ai", "icon": "👤", "color": "#EF4444"},
+        {"name": "Metrics", "type": "metrics", "category": "ai", "icon": "📊", "color": "#3B82F6"},
         {"name": "Transform", "type": "transform", "category": "logic", "icon": "🔄", "color": "#A855F7"},
         {"name": "Condition", "type": "condition", "category": "logic", "icon": "🔀", "color": "#06B6D4"},
         {"name": "Code", "type": "code", "category": "logic", "icon": "💻", "color": "#6366F1"},
@@ -514,6 +517,122 @@ async def telegram_webhook_handler(webhook_id: str, token: str, request: dict):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ==========================================
+# 8. Activepieces Connection Management
+# ==========================================
+# These endpoints let the frontend / manager script connect to a running
+# Activepieces instance, deploy the Telegram routing flow, and manage
+# credentials — replacing the manual n8n workflow import.
+
+class DeployFlowRequest(BaseModel):
+    publish: bool = True
+    telegram_bot_token: Optional[str] = None
+
+
+class UpsertConnectionRequest(BaseModel):
+    bot_token: str
+    name: str = "telegram_bot"
+
+
+@app.get("/activepieces/status")
+async def activepieces_status():
+    """Check whether Activepieces is reachable and configured."""
+    connector = get_connector()
+    health = await connector.health_check()
+    flows = await connector.list_flows()
+    connections = await connector.list_connections()
+    return {
+        "status": "ok" if health.get("reachable") else "unreachable",
+        "activepieces": health,
+        "flows_count": len(flows),
+        "flows": flows,
+        "connections_count": len(connections),
+        "connections": connections,
+    }
+
+
+@app.post("/activepieces/deploy")
+async def activepieces_deploy_flow(request: DeployFlowRequest):
+    """
+    Deploy (create or update) the Telegram routing flow in Activepieces.
+    Optionally upserts the Telegram bot connection first.
+    """
+    connector = get_connector()
+
+    # 1. Upsert Telegram connection if a token was provided
+    connection_result = None
+    token = request.telegram_bot_token or os.getenv("TELEGRAM_TOKEN", "")
+    if token:
+        connection_result = await connector.upsert_telegram_connection(token)
+    else:
+        print("[WARNING] No telegram_bot_token provided or TELEGRAM_TOKEN env set; skipping connection upsert.")
+
+    # 2. Deploy the flow
+    deploy_result = await connector.deploy_flow(publish=request.publish)
+
+    return {
+        "status": "ok" if deploy_result.get("status_code", 500) < 400 else "error",
+        "connection": connection_result,
+        "flow": deploy_result,
+    }
+
+
+@app.get("/activepieces/flows")
+async def activepieces_list_flows():
+    """List all flows in the connected Activepieces instance."""
+    connector = get_connector()
+    flows = await connector.list_flows()
+    return {"status": "ok", "flows": flows}
+
+
+@app.post("/activepieces/flows/{flow_id}/enable")
+async def activepieces_enable_flow(flow_id: str):
+    connector = get_connector()
+    result = await connector.enable_flow(flow_id)
+    return result
+
+
+@app.post("/activepieces/flows/{flow_id}/disable")
+async def activepieces_disable_flow(flow_id: str):
+    connector = get_connector()
+    result = await connector.disable_flow(flow_id)
+    return result
+
+
+@app.delete("/activepieces/flows/{flow_id}")
+async def activepieces_delete_flow(flow_id: str):
+    connector = get_connector()
+    result = await connector.delete_flow(flow_id)
+    return result
+
+
+@app.get("/activepieces/connections")
+async def activepieces_list_connections():
+    """List all connections (credentials) in Activepieces."""
+    connector = get_connector()
+    connections = await connector.list_connections()
+    return {"status": "ok", "connections": connections}
+
+
+@app.post("/activepieces/connections")
+async def activepieces_upsert_connection(request: UpsertConnectionRequest):
+    """Create or update a Telegram bot connection in Activepieces."""
+    connector = get_connector()
+    result = await connector.upsert_telegram_connection(request.bot_token, name=request.name)
+    return result
+
+
+@app.get("/activepieces/flow-definition")
+async def activepieces_flow_definition():
+    """Return the local flow definition JSON so the frontend can preview it."""
+    connector = get_connector()
+    try:
+        definition = connector.get_flow_definition()
+        return {"status": "ok", "flow": definition}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 if __name__ == "__main__":

@@ -9,27 +9,55 @@ import {
   Database,
   Wrench,
   Settings,
-  Bell,
   Menu,
   X,
-  BarChart3,
   Store,
+  BarChart3,
+  Loader2,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { useRole } from '@/hooks/useRole'
+import { RoleBadge } from '@/components/rbac/RoleBadge'
+import { hasPermission, type Permission } from '@/lib/rbac'
+import { NotificationsMenu } from '@/components/dashboard/notifications-menu'
+import { AccountMenu } from '@/components/dashboard/account-menu'
 
-const navLinks = [
-  { label: 'Overview', href: '/dashboard', icon: LayoutDashboard },
-  { label: 'Knowledge Base', href: '/upload', icon: Database },
-  { label: 'Actions', href: '/actions', icon: Wrench },
-  { label: 'Metrics', href: '/metrics', icon: BarChart3 },
-  { label: 'Agent', href: '/agent', icon: Settings },
-  { label: 'Marketplace', href: '/marketplace', icon: Store },
+// Icon map — maps string names to components
+const ICON_MAP: Record<string, typeof LayoutDashboard> = {
+  LayoutDashboard,
+  Database,
+  Wrench,
+  Settings,
+  Store,
+  BarChart3,
+}
+
+interface NavLink {
+  label: string
+  href: string
+  icon: string
+  requiredPermission: Permission
+}
+
+const ALL_NAV_LINKS: NavLink[] = [
+  { label: 'Overview', href: '/dashboard', icon: 'LayoutDashboard', requiredPermission: 'dashboard:view' },
+  { label: 'Knowledge Base', href: '/upload', icon: 'Database', requiredPermission: 'knowledge:manage' },
+  { label: 'Actions', href: '/actions', icon: 'Wrench', requiredPermission: 'actions:manage' },
+  { label: 'Agent', href: '/agent', icon: 'Settings', requiredPermission: 'agent:use' },
+  { label: 'Metrics', href: '/metrics', icon: 'BarChart3', requiredPermission: 'metrics:view' },
+  { label: 'Marketplace', href: '/marketplace', icon: 'Store', requiredPermission: 'marketplace:view' },
+  { label: 'Settings', href: '/settings', icon: 'Settings', requiredPermission: 'settings:manage' },
 ]
 
 export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string }) {
   const [open, setOpen] = useState(false)
   const pathname = usePathname()
+  const { role, loading } = useRole()
+
+  // Filter nav links based on role
+  const navLinks = ALL_NAV_LINKS.filter((link) =>
+    hasPermission(role, link.requiredPermission),
+  )
 
   return (
     <header className="sticky top-0 z-50 border-b border-border/60 bg-background/80 backdrop-blur-md">
@@ -43,42 +71,35 @@ export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string
           </Link>
 
           <nav className="hidden items-center gap-1 md:flex">
-            {navLinks.map((link) => {
-              const active = pathname === link.href
-              return (
-                <Link
-                  key={link.label}
-                  href={link.href}
-                  className={cn(
-                    'flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                    active
-                      ? 'bg-secondary text-foreground'
-                      : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
-                  )}
-                >
-                  <link.icon className="size-4" />
-                  {link.label}
-                </Link>
-              )
-            })}
+            {loading ? (
+              <Loader2 className="size-4 animate-spin text-muted-foreground" />
+            ) : (
+              navLinks.map((link) => {
+                const active = pathname === link.href
+                const Icon = ICON_MAP[link.icon] ?? LayoutDashboard
+                return (
+                  <Link
+                    key={link.label}
+                    href={link.href}
+                    className={cn(
+                      'flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                      active
+                        ? 'bg-secondary text-foreground'
+                        : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
+                    )}
+                  >
+                    <Icon className="size-4" />
+                    {link.label}
+                  </Link>
+                )
+              })
+            )}
           </nav>
         </div>
 
         <div className="hidden items-center gap-3 md:flex">
-          <button
-            type="button"
-            className="relative flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-            aria-label="Notifications"
-          >
-            <Bell className="size-5" />
-            <span className="absolute right-2 top-2 size-2 rounded-full bg-primary" />
-          </button>
-          <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-card px-3 py-1.5">
-            <span className="flex size-6 items-center justify-center rounded-full bg-primary/15 text-xs font-bold text-primary">
-              {tenantName.charAt(0)}
-            </span>
-            <span className="text-sm font-medium">{tenantName}</span>
-          </div>
+          <NotificationsMenu tenantName={tenantName} />
+          <AccountMenu tenantName={tenantName} />
         </div>
 
         <button
@@ -97,6 +118,7 @@ export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string
           <nav className="flex flex-col gap-1">
             {navLinks.map((link) => {
               const active = pathname === link.href
+              const Icon = ICON_MAP[link.icon] ?? LayoutDashboard
               return (
                 <Link
                   key={link.label}
@@ -109,12 +131,17 @@ export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string
                       : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
                   )}
                 >
-                  <link.icon className="size-4" />
+                  <Icon className="size-4" />
                   {link.label}
                 </Link>
               )
             })}
           </nav>
+          {role && (
+            <div className="mt-3 pt-3 border-t border-border/60">
+              <RoleBadge role={role} size="md" />
+            </div>
+          )}
         </div>
       )}
     </header>

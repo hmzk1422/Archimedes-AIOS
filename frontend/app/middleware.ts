@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { canAccessRoute, normalizeRole } from '../lib/rbac'
 
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
@@ -25,15 +26,50 @@ export async function middleware(request: NextRequest) {
 
   const { data: { user } } = await supabase.auth.getUser()
 
-  if (!user && request.nextUrl.pathname.startsWith('/dashboard')) {
+  // ── Auth check: redirect to /auth if not logged in ──
+  const protectedRoutes = ['/dashboard', '/upload', '/actions', '/agent', '/marketplace', '/metrics', '/settings']
+  const isProtected = protectedRoutes.some(
+    (route) => request.nextUrl.pathname === route || request.nextUrl.pathname.startsWith(route + '/')
+  )
+
+  if (!user && isProtected) {
     const url = request.nextUrl.clone()
     url.pathname = '/auth'
     return NextResponse.redirect(url)
+  }
+
+  // ── RBAC check: redirect to /dashboard if role lacks permission ──
+  if (user && isProtected) {
+    // Fetch the user's role from the profiles table
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    const role = normalizeRole(profile?.role)
+    const pathname = request.nextUrl.pathname
+
+    if (!canAccessRoute(role, pathname)) {
+      const url = request.nextUrl.clone()
+      url.pathname = '/dashboard'
+      // Add a query param so the dashboard can show an "access denied" message
+      url.searchParams.set('error', 'insufficient_permissions')
+      return NextResponse.redirect(url)
+    }
   }
 
   return supabaseResponse
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*'],
+  matcher: [
+    '/dashboard/:path*',
+    '/upload/:path*',
+    '/actions/:path*',
+    '/agent/:path*',
+    '/marketplace/:path*',
+    '/metrics/:path*',
+    '/settings/:path*',
+  ],
 }
