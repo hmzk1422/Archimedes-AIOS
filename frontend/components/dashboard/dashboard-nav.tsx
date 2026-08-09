@@ -39,7 +39,6 @@ interface NavLink {
 
 const ALL_NAV_LINKS: NavLink[] = [
   { label: 'Overview', href: '/dashboard', icon: 'LayoutDashboard', requiredPermission: 'dashboard:view' },
-  { label: 'Knowledge Base', href: '/upload', icon: 'Database', requiredPermission: 'knowledge:manage' },
   { label: 'Actions', href: '/actions', icon: 'Wrench', requiredPermission: 'actions:manage' },
   { label: 'Agent', href: '/agent', icon: 'Settings', requiredPermission: 'agent:use' },
   { label: 'Marketplace', href: '/marketplace', icon: 'Store', requiredPermission: 'marketplace:view' },

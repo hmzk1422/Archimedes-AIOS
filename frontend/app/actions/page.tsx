@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
-import { Plus, Loader2, Trash2, Save, FileJson, Shield, Puzzle, ListTodo, Workflow } from 'lucide-react'
+import { Plus, Loader2, Trash2, Save, FileJson, Shield, Puzzle, ListTodo, Workflow, Bot, Database } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -11,6 +11,10 @@ import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import ExtensionPage from '@/components/dashboard/extensionpage'
 import { PageBackground } from '@/components/page-background'
+import { NodePalette } from '@/components/dashboard/node-palette'
+import { AICoderWidget } from '@/components/dashboard/widgets/ai-coder-widget'
+import { KnowledgeBasePanel } from '@/components/knowledge-base/KnowledgeBasePanel'
+import type { DashboardWidget } from '@/components/dashboard/widgets/types'
 
 // 1. Define the exact structure based on your 6 parameters
 type AgentTask = {
@@ -38,7 +42,20 @@ export default function TasksPage() {
   const [rowId, setRowId] = useState<string | null>(null) // Track the DB row ID if it exists
   const [tenantName, setTenantName] = useState<string>('Workspace') // Track tenant name for nav
   const [isDirty, setIsDirty] = useState(false) // Unsaved local edits not yet written to Supabase
-  const [activeSection, setActiveSection] = useState<'tasks' | 'workflow'>('tasks')
+  const [activeSection, setActiveSection] = useState<'tasks' | 'workflow' | 'ai-coder' | 'knowledge'>('tasks')
+  const [workflowNodesOpen, setWorkflowNodesOpen] = useState(false)
+
+  // AI Coder widget state
+  const [aiCoderWidget] = useState<DashboardWidget>({
+    id: 'ai-coder-widget',
+    type: 'ai-coder',
+    x: 0,
+    y: 0,
+    w: 3,
+    h: 3,
+    config: { title: 'AI Widget Builder' },
+    dataSource: { nodeType: 'telemetry_metrics' },
+  })
 
   // Form State
   const [formData, setFormData] = useState({
@@ -259,6 +276,8 @@ export default function TasksPage() {
             {([
               { key: 'tasks' as const, label: 'Agent Tasks', icon: ListTodo },
               { key: 'workflow' as const, label: 'Agentic Workflow', icon: Workflow },
+              { key: 'ai-coder' as const, label: 'AI Coder', icon: Bot },
+              { key: 'knowledge' as const, label: 'Knowledge Base', icon: Database },
             ]).map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
@@ -293,6 +312,23 @@ export default function TasksPage() {
           ) : activeSection === 'workflow' ? (
             <div className="h-full overflow-hidden p-6">
               <ExtensionPage fullScreen />
+            </div>
+          ) : activeSection === 'ai-coder' ? (
+            <div className="h-full overflow-y-auto p-6">
+              <div className="mx-auto max-w-4xl">
+                <div className="mb-6">
+                  <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">AI Tools</p>
+                  <h1 className="mt-1 font-display text-3xl font-bold tracking-tight">AI Widget Builder</h1>
+                  <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                    Describe the dashboard widget you want to create, and AI will generate it for you.
+                  </p>
+                </div>
+                <AICoderWidget widget={aiCoderWidget} />
+              </div>
+            </div>
+          ) : activeSection === 'knowledge' ? (
+            <div className="h-full overflow-y-auto">
+              <KnowledgeBasePanel embedded />
             </div>
           ) : (
             <div className="h-full overflow-y-auto">

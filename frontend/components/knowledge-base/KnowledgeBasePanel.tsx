@@ -79,7 +79,7 @@ function isValidUrl(value: string) {
   }
 }
 
-export default function UploadPage() {
+export function KnowledgeBasePanel({ embedded = false }: { embedded?: boolean } = {}) {
   const router = useRouter()
 
   // Auth & Profile State
@@ -552,12 +552,16 @@ export default function UploadPage() {
   const activeStatus = mode === 'file' ? status : linkStatus
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-background">
-      <PageBackground />
-      {/* Dynamic Nav mimicking the Dashboard */}
-      <DashboardNav tenantName={tenantName} />
+    <div className={embedded ? 'h-full overflow-y-auto' : 'relative min-h-screen overflow-hidden bg-background'}>
+      {!embedded && (
+        <>
+          <PageBackground />
+          {/* Dynamic Nav mimicking the Dashboard */}
+          <DashboardNav tenantName={tenantName} />
+        </>
+      )}
 
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:py-10">
+      <main className={embedded ? '' : 'mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:py-10'}>
         <div>
           <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Knowledge Base</p>
           <h1 className="mt-1 font-display text-3xl font-bold tracking-tight text-balance">Upload knowledge</h1>

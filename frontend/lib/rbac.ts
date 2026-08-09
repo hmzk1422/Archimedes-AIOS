@@ -103,7 +103,6 @@ export const ALL_ROLES: Role[] = ['admin', 'developer', 'viewer']
 
 export const ROUTE_PERMISSIONS: Record<string, Permission> = {
   '/dashboard': 'dashboard:view',
-  '/upload': 'knowledge:manage',
   '/actions': 'actions:manage',
   '/agent': 'agent:use',
   '/marketplace': 'marketplace:view',
@@ -178,7 +177,6 @@ export function getNavLinksForRole(role: Role | null | undefined): Array<{
 }> {
   const allLinks = [
     { label: 'Overview', href: '/dashboard', icon: 'LayoutDashboard', requiredPermission: 'dashboard:view' as Permission },
-    { label: 'Knowledge Base', href: '/upload', icon: 'Database', requiredPermission: 'knowledge:manage' as Permission },
     { label: 'Actions', href: '/actions', icon: 'Wrench', requiredPermission: 'actions:manage' as Permission },
     { label: 'Agent', href: '/agent', icon: 'Settings', requiredPermission: 'agent:use' as Permission },
     { label: 'Marketplace', href: '/marketplace', icon: 'Store', requiredPermission: 'marketplace:view' as Permission },

@@ -71,7 +71,6 @@ ROLE_PERMISSIONS = {
 
 ROUTE_PERMISSIONS = {
     "/dashboard": "dashboard:view",
-    "/upload": "knowledge:manage",
     "/actions": "actions:manage",
     "/agent": "agent:use",
     "/marketplace": "marketplace:view",
