@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file
+from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file, delete_all_tenant_data
 from telemetry_sdk import get_telemetry, reset_telemetry
 from supabase import create_client, Client
 from hitl import fetch_hitl_config, evaluate_hitl, HITLDecision, detect_sentiment, fetch_task_names
@@ -51,13 +51,17 @@ class DeleteKnowledgeRequest(BaseModel):
 async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks):
     """Trigger preprocessing in the background."""
     try:
-        # Pass the heavy lifting to a background thread
+        # ✅ FIX: Guard against empty tenant_id. An empty string was previously
+        # passed straight through to preprocess(), resulting in tenant_scope=""
+        # and documents stored with tenant_id="" (NULL in JSONB). Default to
+        # "global" so every vectorized document always carries a non-empty
+        # tenant_id.
+        effective_tenant_id = request.tenant_id or "global"
         background_tasks.add_task(
             preprocess,
-            tenant_id=request.tenant_id,
+            tenant_id=effective_tenant_id,
             datatype_label=request.datatype
         )
-        # Immediately return success to the client/n8n
         return {"status": "ok", "message": "Ingestion started in the background"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -181,6 +185,25 @@ async def delete_knowledge_endpoint(request: DeleteKnowledgeRequest):
     """Delete the indexed knowledge rows for a file that was removed from storage."""
     try:
         result = delete_knowledge_file(request.tenant_id, request.datatype, request.file_name)
+        return {"status": "ok", **result}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+class AccountDeleteRequest(BaseModel):
+    tenant_id: str
+
+
+@app.post("/account/delete")
+async def account_delete_endpoint(request: AccountDeleteRequest):
+    """
+    Delete ALL knowledge data for a tenant (workspace): raw parsed rows,
+    pgvector documents, and storage files. Called when an account/workspace is
+    deleted so no orphaned data (which could later bleed into a new tenant)
+    is left in the database.
+    """
+    try:
+        result = delete_all_tenant_data(request.tenant_id)
         return {"status": "ok", **result}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}

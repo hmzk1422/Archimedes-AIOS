@@ -12,7 +12,6 @@ import {
   Menu,
   X,
   Store,
-  BarChart3,
   Loader2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -29,7 +28,6 @@ const ICON_MAP: Record<string, typeof LayoutDashboard> = {
   Wrench,
   Settings,
   Store,
-  BarChart3,
 }
 
 interface NavLink {
@@ -44,7 +42,6 @@ const ALL_NAV_LINKS: NavLink[] = [
   { label: 'Knowledge Base', href: '/upload', icon: 'Database', requiredPermission: 'knowledge:manage' },
   { label: 'Actions', href: '/actions', icon: 'Wrench', requiredPermission: 'actions:manage' },
   { label: 'Agent', href: '/agent', icon: 'Settings', requiredPermission: 'agent:use' },
-  { label: 'Metrics', href: '/metrics', icon: 'BarChart3', requiredPermission: 'metrics:view' },
   { label: 'Marketplace', href: '/marketplace', icon: 'Store', requiredPermission: 'marketplace:view' },
   { label: 'Settings', href: '/settings', icon: 'Settings', requiredPermission: 'settings:manage' },
 ]

@@ -23,6 +23,18 @@ function legacyToFlowConfig(legacy: Record<string, unknown> | null): FlowConfig 
     | Record<string, unknown>
     | undefined
 
+  // If the full flow config was persisted alongside the legacy platform
+  // credentials (see flowToLegacyConfig), prefer it so every node/edge
+  // round-trips instead of being reduced to platform credentials only.
+  const embeddedFlow = connection?.flow as FlowConfig | undefined
+  if (embeddedFlow && typeof embeddedFlow === 'object' && embeddedFlow.nodes) {
+    return {
+      masterEnabled: Boolean(embeddedFlow.masterEnabled ?? connection?.enabled ?? true),
+      nodes: embeddedFlow.nodes,
+      edges: embeddedFlow.edges ?? [],
+    }
+  }
+
   const masterEnabled = Boolean(connection?.enabled ?? true)
   const platforms = (connection?.platforms as Record<string, { enabled: boolean; config: Record<string, string> }>) ?? {}
 
@@ -112,15 +124,25 @@ function flowToLegacyConfig(flow: FlowConfig): Record<string, unknown> {
     }
   })
 
+  // Persist the full flow alongside the legacy platform credentials so the
+  // editor can round-trip every node type (AI Agent, Database, dynamic
+  // Activepieces pieces, custom input nodes, connections, etc.). The
+  // `platforms` object is still populated above and is what the backend
+  // services (extension.py / gemini.py) read, so they keep working unchanged.
   return {
     'connection-extension': {
       enabled: flow.masterEnabled,
       platforms,
+      flow: {
+        masterEnabled: flow.masterEnabled,
+        nodes: flow.nodes,
+        edges: flow.edges,
+      },
     },
   }
 }
 
-export default function ExtensionPage() {
+export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boolean }) {
   const [flowConfig, setFlowConfig] = useState<FlowConfig>({ masterEnabled: true, nodes: {}, edges: [] })
   const [loading, setLoading] = useState(false)
   const [checking, setChecking] = useState(true)
@@ -197,6 +219,23 @@ export default function ExtensionPage() {
   }, [])
 
   if (checking) {
+    if (fullScreen) {
+      return (
+        <div className="flex h-full min-h-0 flex-col gap-4">
+          <div>
+            <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Connections</p>
+            <h2 className="mt-1 font-display text-2xl font-bold tracking-tight">Agentic Workflow</h2>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+              Drag and drop nodes to build your agent workflow.
+            </p>
+          </div>
+          <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-border bg-card">
+            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+          </div>
+        </div>
+      )
+    }
+
     return (
       <section className="space-y-6">
         <div>
@@ -215,6 +254,47 @@ export default function ExtensionPage() {
     )
   }
 
+  // Status chip shown on top of the editor when present.
+  const statusChip = status.message ? (
+    <div className={cn(
+      'rounded-lg border p-3 text-sm flex items-center gap-2',
+      status.kind === 'success' && 'border-primary/20 bg-primary/10 text-primary',
+      status.kind === 'error' && 'border-destructive/20 bg-destructive/10 text-destructive',
+      status.kind === 'info' && 'border-border bg-muted text-muted-foreground'
+    )}>
+      <AlertCircle className="size-4" />
+      <p>{status.message}</p>
+    </div>
+  ) : null
+
+  if (fullScreen) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Connections</p>
+            <h2 className="mt-1 font-display text-2xl font-bold tracking-tight">Agentic Workflow</h2>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+              Drag and drop nodes to build your agent workflow. Connect inputs → processing → outputs.
+            </p>
+          </div>
+        </div>
+
+        {statusChip}
+
+        <div className="min-h-0 flex-1">
+          <WorkflowEditor
+            initialConfig={flowConfig}
+            onSave={handleSave}
+            loading={loading}
+            status={status.kind !== 'idle' ? status : null}
+            fullScreen
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <section className="space-y-6">
       <div>
@@ -225,17 +305,7 @@ export default function ExtensionPage() {
         </p>
       </div>
 
-      {status.message && (
-        <div className={cn(
-          'rounded-lg border p-3 text-sm flex items-center gap-2',
-          status.kind === 'success' && 'border-primary/20 bg-primary/10 text-primary',
-          status.kind === 'error' && 'border-destructive/20 bg-destructive/10 text-destructive',
-          status.kind === 'info' && 'border-border bg-muted text-muted-foreground'
-        )}>
-          <AlertCircle className="size-4" />
-          <p>{status.message}</p>
-        </div>
-      )}
+      {statusChip}
 
       <Card>
         <CardHeader className="pb-4">

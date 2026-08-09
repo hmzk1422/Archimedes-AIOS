@@ -116,7 +116,13 @@ def run_app(platform="n8n"):
             processes.append(p_main)
 
             print("🏢 Starting Company API (Port 8002)...")
-            p_comp = subprocess.Popen([python_path, "company_api.py"], cwd=api_dir)
+            # Run company-api via uvicorn WITH --reload so edits to company-api.py
+            # hot-reload instead of requiring a full app restart (matches the
+            # main.py / extension.py services below).
+            p_comp = subprocess.Popen(
+                [python_path, "-m", "uvicorn", "company-api:app", "--host", "0.0.0.0", "--port", "8002", "--reload"],
+                cwd=api_dir
+            )
             processes.append(p_comp)
             
             # Inside manager.py

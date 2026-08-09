@@ -83,9 +83,10 @@ export async function joinWorkspaceAction(formData: FormData) {
   const userId = formData.get('userId') as string
 
   // Team members join as viewer until an admin changes their role.
+  // The 'admin' role is reserved for the workspace owner and can never be self-requested.
   const rawRole = (formData.get('role') as string)?.toLowerCase()
   const role: Role =
-    rawRole && ['admin', 'developer', 'viewer'].includes(rawRole)
+    rawRole && ['developer', 'viewer'].includes(rawRole)
       ? (rawRole as Role)
       : 'viewer'
 
@@ -161,6 +162,11 @@ export async function updateRoleAction(formData: FormData) {
     throw new Error('Admins cannot change their own role from the member list')
   }
 
+  // The Admin (owner) role is reserved — no one (not even another admin) can grant it.
+  if (newRole === 'admin') {
+    throw new Error('The Admin role is reserved for the workspace owner and cannot be granted to other members')
+  }
+
   // Use the service role to bypass RLS so the admin can update a teammate's row.
   const supabase = createAdminClient()
   const { error } = await supabase
@@ -230,10 +236,42 @@ export async function deleteAccountAction() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   )
 
+  // Resolve the workspace (tenant) this user belongs to. The AI tenant is the
+  // workspace id, so we know which knowledge data belongs to this account.
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('workspace_id')
+    .eq('id', user.id)
+    .maybeSingle()
+  const workspaceId = profile?.workspace_id ?? user.id
+
   // Delete the user from Auth
   const { error } = await supabaseAdmin.auth.admin.deleteUser(user.id)
 
   if (error) throw new Error(error.message)
+
+  // Clean up orphaned knowledge data ONLY if no other member remains in this
+  // workspace. (A developer deleting their account must NOT wipe the shared
+  // workspace AI data; the admin/workspace is the tenant.)
+  // Deletes raw parsed rows + pgvector documents + storage files for the tenant.
+  try {
+    const { data: remaining } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('workspace_id', workspaceId)
+      .neq('id', user.id)
+      .limit(1)
+
+    if (!remaining || remaining.length === 0) {
+      await fetch('http://localhost:8000/account/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: workspaceId }),
+      }).catch(() => {})
+    }
+  } catch {
+    // Knowledge cleanup is best-effort — never block account deletion on it.
+  }
 
   // Sign out the current session
   await supabase.auth.signOut()

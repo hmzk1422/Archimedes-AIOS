@@ -428,7 +428,7 @@ export default function SettingsPage() {
                   User Management
                 </CardTitle>
                 <CardDescription>
-                  Change the role of any team member. Only admins can access this section.
+                  Change the role of any team member. Only admins can access this section. The Admin (owner) role is fixed and cannot be granted to other members.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -466,7 +466,7 @@ export default function SettingsPage() {
                               Owner — role is fixed
                             </span>
                           ) : (
-                            ALL_ROLES.map((r) => {
+                            ALL_ROLES.filter((r) => r !== 'admin').map((r) => {
                               const selected = u.role === r
                               const isSaving = savingUserId === u.id
                               return (

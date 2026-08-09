@@ -11,12 +11,14 @@ import { createClient } from '@/utils/supabase/client'
 import ChatInterface from '@/components/ChatInterface'
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { PageBackground } from '@/components/page-background'
+import { resolveTenantId } from '@/lib/tenant'
 
 export default function Home() {
   const router = useRouter()
 
   // Auth & Profile State
   const [userId, setUserId] = useState<string | null>(null)
+  const [tenantId, setTenantId] = useState<string | null>(null)
   const [tenantName, setTenantName] = useState<string>('there')
   const [checkingUser, setCheckingUser] = useState(true)
 
@@ -31,6 +33,9 @@ export default function Home() {
       }
 
       setUserId(user.id)
+      // The AI tenant is the workspace (shared across admin + team members),
+      // NOT the individual user id.
+      setTenantId(await resolveTenantId(user.id))
 
       // Fetch tenant_name matching the dashboard requirements
       const { data: profile } = await supabase
@@ -70,7 +75,7 @@ export default function Home() {
 
         {/* Chat Container taking exactly the remaining space, width-to-width */}
         <div className="flex min-h-0 flex-1 flex-col bg-background">
-          {userId && <ChatInterface tenantId={userId} />}
+          {tenantId && <ChatInterface tenantId={tenantId} />}
         </div>
         
       </main>

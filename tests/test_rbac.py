@@ -75,7 +75,6 @@ ROUTE_PERMISSIONS = {
     "/actions": "actions:manage",
     "/agent": "agent:use",
     "/marketplace": "marketplace:view",
-    "/metrics": "metrics:view",
     "/settings": "settings:manage",
 }
 
@@ -193,8 +192,8 @@ def test_route_access():
     assert not can_access_route("developer", "/settings"), "Developer should NOT access /settings"
     print(f"✅ Developer can access {len(dev_accessible)} routes, blocked from /settings")
 
-    # Viewer can only access dashboard, metrics
-    viewer_accessible = ["/dashboard", "/metrics"]
+    # Viewer can only access dashboard (read-only routes)
+    viewer_accessible = ["/dashboard"]
     for route in viewer_accessible:
         assert can_access_route("viewer", route), f"Viewer should access {route}"
     viewer_blocked = [r for r in ROUTE_PERMISSIONS if r not in viewer_accessible]

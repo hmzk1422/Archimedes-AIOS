@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useRef, useState, useEffect, DragEvent, useMemo } from 'react'
+import { useCallback, useRef, useState, useEffect, DragEvent, ClipboardEvent, useMemo } from 'react'
 import {
   ReactFlow,
   Background,
@@ -17,7 +17,7 @@ import {
   type OnEdgesChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Save, Loader2, Trash2, AlertCircle, GripVertical, Search, X } from 'lucide-react'
+import { Save, Loader2, Trash2, AlertCircle, GripVertical, Search, X, Copy, ClipboardPaste } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import WorkflowNode from './WorkflowNode'
@@ -34,10 +34,26 @@ interface WorkflowEditorProps {
   onSave: (config: FlowConfig) => Promise<void>
   loading?: boolean
   status?: { kind: 'idle' | 'success' | 'error' | 'info'; message: string } | null
+  /** When true the editor fills its parent's height instead of a fixed 600px tall box. */
+  fullScreen?: boolean
 }
 
 function generateId(): string {
   return `node_${Math.random().toString(36).substring(2, 9)}`
+}
+
+/** Serializable copy/paste payload — works in-canvas and across canvases/tabs. */
+interface ClipboardNode {
+  id: string
+  typeId: NodeTypeId
+  label: string
+  position: { x: number; y: number }
+  config: Record<string, string>
+}
+
+interface ClipboardData {
+  nodes: ClipboardNode[]
+  edges: { source: string; target: string; sourceHandle: string; targetHandle: string }[]
 }
 
 /** Map legacy handle IDs ("in"/"out") to the correct port ID from the node definition */
@@ -91,7 +107,7 @@ const isValidConnection = (connection: Connection): boolean => {
   return isSourceOutput && isTargetInput
 }
 
-export default function WorkflowEditor({ initialConfig, onSave, loading, status }: WorkflowEditorProps) {
+export default function WorkflowEditor({ initialConfig, onSave, loading, status, fullScreen = false }: WorkflowEditorProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null)
   const [masterEnabled, setMasterEnabled] = useState(initialConfig?.masterEnabled ?? true)
@@ -279,6 +295,157 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
     setEdges([])
   }, [setNodes, setEdges])
 
+  // ──────────────────────────────────────────────
+  // Copy / Paste (Activepieces-style)
+  // ──────────────────────────────────────────────
+  const clipboardRef = useRef<ClipboardData | null>(null)
+  const [canPaste, setCanPaste] = useState(false)
+
+  const copySelection = useCallback(() => {
+    const selectedNodes = nodes.filter((n) => n.selected)
+    if (selectedNodes.length === 0) return
+
+    const selectedIds = new Set(selectedNodes.map((n) => n.id))
+    const selectedEdges = edges.filter(
+      (e) => selectedIds.has(e.source) && selectedIds.has(e.target)
+    )
+
+    const clipData: ClipboardData = {
+      nodes: selectedNodes.map((n) => {
+        const d = n.data as Record<string, unknown>
+        return {
+          id: n.id,
+          typeId: (d.typeId as NodeTypeId) || 'ai-agent',
+          label: (d.label as string) || '',
+          position: { x: n.position.x, y: n.position.y },
+          config: (d.config as Record<string, string>) || {},
+        }
+      }),
+      edges: selectedEdges.map((e) => ({
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle || 'out',
+        targetHandle: e.targetHandle || 'in',
+      })),
+    }
+
+    clipboardRef.current = clipData
+    setCanPaste(true)
+
+    // Also put a portable JSON payload on the real clipboard so the same nodes can
+    // be pasted into another flow / another tab, just like Activepieces.
+    try {
+      navigator.clipboard?.writeText(JSON.stringify(clipData))
+    } catch {
+      // best-effort — the in-memory ref still enables in-canvas paste
+    }
+  }, [nodes, edges])
+
+  const pasteFromData = useCallback(
+    (clipData: ClipboardData, at?: { x: number; y: number }) => {
+      const sourceNodes = clipData.nodes || []
+      if (sourceNodes.length === 0) return
+
+      let minX = Infinity
+      let minY = Infinity
+      sourceNodes.forEach((n) => {
+        if (n.position.x < minX) minX = n.position.x
+        if (n.position.y < minY) minY = n.position.y
+      })
+
+      // "at" positions the top-left of the pasted group at the drop point (if given),
+      // otherwise the pasted group is offset from the original nodes.
+      const offsetX = at ? at.x - minX : 40
+      const offsetY = at ? at.y - minY : 40
+
+      const idMap = new Map<string, string>()
+      const newNodes: Node[] = sourceNodes.map((n) => {
+        const newId = generateId()
+        idMap.set(n.id, newId)
+        return nodeConfigToReactFlowNode(
+          newId,
+          {
+            typeId: n.typeId,
+            label: n.label,
+            position: { x: n.position.x + offsetX, y: n.position.y + offsetY },
+            config: n.config || {},
+            enabled: true,
+          },
+          handleConfigChange,
+          handleLabelChange
+        )
+      })
+
+      const newEdges: Edge[] = (clipData.edges || [])
+        .filter((e) => idMap.has(e.source) && idMap.has(e.target))
+        .map((e) => ({
+          ...defaultEdgeOptions,
+          id: `edge_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+          source: idMap.get(e.source)!,
+          target: idMap.get(e.target)!,
+          sourceHandle: e.sourceHandle,
+          targetHandle: e.targetHandle,
+          selected: false,
+        }))
+
+      setNodes((nds: Node[]) =>
+        nds
+          .map((n) => (n.selected ? { ...n, selected: false } : n))
+          .concat(newNodes.map((n) => ({ ...n, selected: true })))
+      )
+      setEdges((eds: Edge[]) => eds.concat(newEdges))
+      setCanPaste(true)
+    },
+    [setNodes, setEdges, handleConfigChange, handleLabelChange]
+  )
+
+  const pasteClipboard = useCallback(() => {
+    if (clipboardRef.current) {
+      pasteFromData(clipboardRef.current)
+    }
+  }, [pasteFromData])
+
+  // Handles pasting a JSON payload from an external clipboard (e.g. copied from
+  // another flow, another tab, or a JSON export).
+  const handleCanvasPaste = useCallback(
+    (event: ClipboardEvent<HTMLDivElement>) => {
+      const text = event.clipboardData?.getData('text/plain')
+      if (!text) return
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        return // not our JSON payload
+      }
+
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as ClipboardData).nodes)) {
+        return
+      }
+
+      const raw = parsed as ClipboardData
+      const normalizedNodes: ClipboardNode[] = (raw.nodes || [])
+        .filter((n) => n && typeof n === 'object' && typeof n.typeId === 'string')
+        .map((n) => ({
+          id: String(n.id ?? generateId()),
+          typeId: n.typeId as NodeTypeId,
+          label: String(n.label ?? ''),
+          position: {
+            x: Number(n.position?.x ?? 0),
+            y: Number(n.position?.y ?? 0),
+          },
+          config: (n.config as Record<string, string>) || {},
+        }))
+
+      if (normalizedNodes.length === 0) return
+
+      event.preventDefault()
+      clipboardRef.current = { nodes: normalizedNodes, edges: raw.edges || [] }
+      pasteFromData(clipboardRef.current)
+    },
+    [pasteFromData]
+  )
+
   const handleSave = useCallback(async () => {
     const flowConfig: FlowConfig = {
       masterEnabled,
@@ -347,6 +514,22 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
         removeSelected()
       }
       
+      if ((event.ctrlKey || event.metaKey) && event.key === 'c') {
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+          return
+        }
+        event.preventDefault()
+        copySelection()
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key === 'v') {
+        if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+          return
+        }
+        event.preventDefault()
+        pasteClipboard()
+      }
+
       if ((event.ctrlKey || event.metaKey) && event.key === 's') {
         event.preventDefault()
         if (!loading) {
@@ -357,10 +540,10 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [removeSelected, handleSave, loading])
+  }, [removeSelected, copySelection, pasteClipboard, handleSave, loading])
 
   return (
-    <div className="flex h-[600px] gap-4">
+    <div className={cn('flex gap-4', fullScreen ? 'h-full min-h-0' : 'h-[600px]')}>
       {/* Sidebar - Draggable Node Palette */}
       <div className="w-64 shrink-0 flex flex-col rounded-xl border border-border bg-card shadow-sm">
         {/* Search */}
@@ -433,7 +616,7 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
       </div>
 
       {/* Canvas */}
-      <div className="relative flex-1 rounded-xl border border-border bg-background/50 shadow-sm overflow-hidden">
+      <div className="relative flex-1 rounded-xl border border-border bg-background/50 shadow-sm overflow-hidden" onPaste={handleCanvasPaste}>
         {/* Toolbar */}
         <div className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-border bg-card p-1.5 shadow-sm">
           <div className="flex items-center gap-1.5 px-2">
@@ -471,6 +654,29 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status 
           <Button variant="ghost" size="xs" onClick={clearAll} title="Clear all" className="hover:bg-accent/50">
             <Trash2 className="size-3.5 text-foreground" />
             <span className="ml-1 text-[10px] text-foreground">All</span>
+          </Button>
+
+          <div className="h-5 w-px bg-border" />
+
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={copySelection}
+            disabled={!nodes.some((n: Node) => n.selected)}
+            title="Copy selected (Ctrl+C)"
+            className="hover:bg-accent/50"
+          >
+            <Copy className="size-3.5 text-foreground" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={pasteClipboard}
+            disabled={!canPaste}
+            title="Paste (Ctrl+V)"
+            className="hover:bg-accent/50"
+          >
+            <ClipboardPaste className="size-3.5 text-foreground" />
           </Button>
 
           <div className="h-5 w-px bg-border" />
