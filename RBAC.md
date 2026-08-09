@@ -32,7 +32,6 @@ The customer-service-agent platform now supports three user roles with granular 
 | Route | Required Permission | Admin | Developer | Viewer |
 |-------|-------------------|:-----:|:---------:|:------:|
 | `/dashboard` | `dashboard:view` | ✅ | ✅ | ✅ |
-| `/upload` | `knowledge:manage` | ✅ | ✅ | ❌ |
 | `/actions` | `actions:manage` | ✅ | ✅ | ❌ |
 | `/agent` | `agent:use` | ✅ | ✅ | ❌ |
 | `/marketplace` | `marketplace:view` | ✅ | ✅ | ❌ |

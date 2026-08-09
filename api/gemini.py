@@ -3,6 +3,7 @@ import re
 import json
 import glob
 import shutil
+import time
 import urllib.parse
 import requests
 import tempfile
@@ -99,10 +100,16 @@ supabase.options.schema = "public"
 def check_if_md_exists(base_name, datatype_label, tenant_id=None):
     """Queries Supabase to see if the MD content for this file already exists."""
     rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
-    query_parts = [f"filename=eq.{base_name}", f"datatype=eq.{datatype_label}"]
+    # URL-encode filter values so file names with spaces/special chars can't
+    # break the PostgREST query (long/weird names were breaking uploads).
+    query_parts = [
+        f"filename=eq.{urllib.parse.quote(base_name, safe='')}",
+        f"datatype=eq.{urllib.parse.quote(datatype_label, safe='')}",
+    ]
 
-    if tenant_id:
-        query_parts.append(f"tenant_id=eq.{tenant_id}")
+    # ✅ FIX: Always scope the query to a specific tenant_id (defaulting to "global")
+    # so we never accidentally match a row from a different tenant.
+    query_parts.append(f"tenant_id=eq.{urllib.parse.quote(tenant_id or 'global', safe='')}")
 
     query_url = f"{rest_url}?{'&'.join(query_parts)}&select=id"
 
@@ -122,8 +129,12 @@ def check_if_md_exists(base_name, datatype_label, tenant_id=None):
 def check_if_embedded(base_name, datatype_label, tenant_id=None):
     """Checks the VECTOR table (documents), not the raw text table."""
     metadata_filter = {"source": base_name, "datatype": datatype_label}
-    if tenant_id:
-        metadata_filter["tenant_id"] = tenant_id
+    # ✅ FIX: Always include tenant_id in the filter. Using "global" as the
+    # default ensures we never match documents from a different tenant when
+    # the caller passes an empty/None tenant_id. Previously, when tenant_id
+    # was falsy, the key was omitted entirely and ANY document matching source
+    # + datatype would be found — causing cross-tenant false positives.
+    metadata_filter["tenant_id"] = tenant_id or "global"
     query_url = f"{SUPABASE_URL}/rest/v1/documents?metadata=cs.{urllib.parse.quote(json.dumps(metadata_filter))}&select=id&limit=1"
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     try:
@@ -137,9 +148,14 @@ def check_if_embedded(base_name, datatype_label, tenant_id=None):
 def fetch_existing_md(base_name, datatype_label, tenant_id=None):
     """Pulls previously-parsed MD text back out so it can be re-embedded without re-running LlamaParse."""
     rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
-    query_parts = [f"filename=eq.{base_name}", f"datatype=eq.{datatype_label}"]
-    if tenant_id:
-        query_parts.append(f"tenant_id=eq.{tenant_id}")
+    # URL-encode filter values (same protection as check_if_md_exists).
+    query_parts = [
+        f"filename=eq.{urllib.parse.quote(base_name, safe='')}",
+        f"datatype=eq.{urllib.parse.quote(datatype_label, safe='')}",
+    ]
+    # ✅ FIX: Always filter by tenant_id so we only fetch the row belonging to
+    # the current tenant (or "global" bucket), preventing cross-tenant data leakage.
+    query_parts.append(f"tenant_id=eq.{urllib.parse.quote(tenant_id or 'global', safe='')}")
     query_url = f"{rest_url}?{'&'.join(query_parts)}&select=data"
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     try:
@@ -166,7 +182,11 @@ def delete_knowledge_file(tenant_id, datatype_label, file_name):
     deleted_documents = 0
 
     try:
-        query_url = f"{rest_url}?filename=eq.{base_name}&datatype=eq.{datatype_label}&tenant_id=eq.{tenant_id}&select=id"
+        query_url = (
+            f"{rest_url}?filename=eq.{urllib.parse.quote(base_name, safe='')}"
+            f"&datatype=eq.{urllib.parse.quote(datatype_label, safe='')}"
+            f"&tenant_id=eq.{urllib.parse.quote(str(tenant_id), safe='')}&select=id"
+        )
         response = requests.get(query_url, headers=headers, timeout=10)
         if response.status_code == 200:
             rows = response.json() or []
@@ -180,7 +200,11 @@ def delete_knowledge_file(tenant_id, datatype_label, file_name):
 
     try:
         documents_url = f"{SUPABASE_URL}/rest/v1/documents"
-        document_query = f"metadata->>tenant_id=eq.{tenant_id}&metadata->>datatype=eq.{datatype_label}&metadata->>source=eq.{base_name}"  
+        document_query = (
+            f"metadata->>tenant_id=eq.{urllib.parse.quote(str(tenant_id), safe='')}"
+            f"&metadata->>datatype=eq.{urllib.parse.quote(datatype_label, safe='')}"
+            f"&metadata->>source=eq.{urllib.parse.quote(base_name, safe='')}"
+        )  
         response = requests.get(
             f"{documents_url}?{document_query}&select=id",
             headers=headers,
@@ -205,6 +229,115 @@ def delete_knowledge_file(tenant_id, datatype_label, file_name):
         "base_name": base_name,
     }
 
+def delete_all_tenant_data(tenant_id):
+    """
+    Delete EVERY piece of knowledge data belonging to a tenant (workspace):
+    raw parsed-markdown rows in customer-service-provider, pgvector documents,
+    and the files in Supabase storage under the tenant's folder. Used when an
+    account/workspace is deleted so no orphaned data is left behind (and so a
+    future tenant with a new id can never bleed into old info).
+    """
+    if not tenant_id:
+        return {"deleted_rows": 0, "deleted_documents": 0, "deleted_files": 0}
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    documents_url = f"{SUPABASE_URL}/rest/v1/documents"
+    bucket = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
+
+    deleted_rows = 0
+    deleted_documents = 0
+    deleted_files = 0
+
+    # 1) Raw parsed-markdown rows in customer-service-provider
+    try:
+        response = requests.get(
+            f"{rest_url}?tenant_id=eq.{tenant_id}&select=id",
+            headers=headers, timeout=15,
+        )
+        for row in (response.json() or []) if response.status_code == 200 else []:
+            del_resp = requests.delete(
+                f"{rest_url}?id=eq.{row['id']}", headers=headers, timeout=15
+            )
+            if del_resp.status_code in {200, 204}:
+                deleted_rows += 1
+    except Exception as exc:
+        print(f"⚠️ delete_all_tenant_data rows: {exc}")
+
+    # 2) pgvector documents whose metadata carries this tenant_id
+    # ✅ FIX: Also catch documents that have NULL, empty, or missing tenant_id
+    # in their metadata — these are orphans left by bugs prior to the
+    # tenant_id-metadata fix. They cannot be matched by the exact eq filter
+    # above, so we run a second sweep covering NULL and empty-string values.
+    try:
+        # 2a. Exact tenant_id match (the common case)
+        response = requests.get(
+            f"{documents_url}?metadata->>tenant_id=eq.{tenant_id}&select=id",
+            headers=headers, timeout=15,
+        )
+        for doc in (response.json() or []) if response.status_code == 200 else []:
+            del_resp = requests.delete(
+                f"{documents_url}?id=eq.{doc['id']}", headers=headers, timeout=15
+            )
+            if del_resp.status_code in {200, 204}:
+                deleted_documents += 1
+
+        # 2b. Safety-net: delete documents with empty-string or NULL tenant_id
+        # that were orphaned by the old "" default or pre-fix insertions.
+        for null_filter in ["tenant_id=eq.", "tenant_id=is.null"]:
+            try:
+                resp = requests.get(
+                    f"{documents_url}?metadata->>{null_filter}&select=id",
+                    headers=headers, timeout=15,
+                )
+                if resp.status_code == 200:
+                    for doc in resp.json() or []:
+                        del_resp = requests.delete(
+                            f"{documents_url}?id=eq.{doc['id']}",
+                            headers=headers, timeout=15,
+                        )
+                        if del_resp.status_code in {200, 204}:
+                            deleted_documents += 1
+            except Exception as exc2:
+                print(f"⚠️ cleanup orphaned documents ({null_filter}): {exc2}")
+    except Exception as exc:
+        print(f"⚠️ delete_all_tenant_data documents: {exc}")
+
+    # 3) Files in Supabase storage under <tenant_id>/...
+    try:
+        prefix = tenant_id.rstrip("/")
+        paths = []
+        def walk(path):
+            items = supabase.storage.from_(bucket).list(path=path)
+            for item in items or []:
+                full = f"{path}/{item['name']}" if path else item["name"]
+                if item.get("id"):  # a real file (folders have no id)
+                    paths.append(full)
+                else:  # a folder -> descend
+                    walk(full)
+        walk(prefix)
+        # Supabase remove() accepts at most 100 paths per call
+        for i in range(0, len(paths), 100):
+            batch = paths[i:i + 100]
+            res = supabase.storage.from_(bucket).remove(batch)
+            if res is not None and not getattr(res, "get", lambda *a: None)("error"):
+                deleted_files += len(batch)
+    except Exception as exc:
+        print(f"⚠️ delete_all_tenant_data storage: {exc}")
+
+    print(
+        f"🧹 Deleted tenant data for {tenant_id}: "
+        f"rows={deleted_rows} docs={deleted_documents} files={deleted_files}"
+    )
+    return {
+        "deleted_rows": deleted_rows,
+        "deleted_documents": deleted_documents,
+        "deleted_files": deleted_files,
+    }
+
 def preprocess(tenant_id=None, datatype_label="policies"):
     print(f"\n--- Processing PDFs from Supabase Storage for {datatype_label.upper()} ---")
 
@@ -217,7 +350,13 @@ def preprocess(tenant_id=None, datatype_label="policies"):
     headers_to_split_on = [("#", "Header 1"), ("##", "Header 2"), ("###", "Header 3")]
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
 
-    tenant_scope = tenant_id or ""
+    # ✅ FIX: Never leave tenant_scope as an empty string. When no tenant_id is
+    # provided we default to "global" so that every document inserted into the
+    # pgvector `documents` table has a *non-null, non-empty* tenant_id in its
+    # metadata JSON. Previously "" was used, which the Supabase JSONB column
+    # showed as NULL — causing orphaned documents that could not be matched
+    # by tenant-scoped queries or cleaned up on account deletion.
+    tenant_scope = tenant_id or "global"
 
     try:
         bucket_name = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
@@ -251,7 +390,7 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             base_name = os.path.splitext(filename_only)[0]
             object_path = relative_path
 
-            embeddings_already_exist = check_if_embedded(base_name, datatype_label, tenant_id=tenant_scope or None)
+            embeddings_already_exist = check_if_embedded(base_name, datatype_label, tenant_id=tenant_scope)
 
             if embeddings_already_exist:
                 print(f"✅ {base_name} already vectorized in 'documents'. Skipping parse.")
@@ -331,27 +470,31 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             item_display = locals().get('filename_only') or locals().get('relative_path') or locals().get('raw_name') or 'unknown'
             print(f"❌ Failed to process {item_display}. Error: {e}")
 
-    def process_database_only_entries(tenant_scope, datatype_label):
+    def process_database_only_entries(tenant_id, tenant_scope, datatype_label):
         """Fetches text directly from DB if it bypassed the storage bucket."""
         rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
         # ✅ FIX: Select tenant_id as well
         query_url = f"{rest_url}?datatype=eq.{datatype_label}&select=filename,data,tenant_id"
-        if tenant_scope:
-            query_url += f"&tenant_id=eq.{tenant_scope}"
+        # ✅ FIX: Use the *original* tenant_id (not the "global" fallback) to filter
+        # the raw table. When tenant_id is None we are in global mode and should
+        # fetch rows from ALL tenants (each row's own tenant_id is preserved below).
+        if tenant_id:
+            query_url += f"&tenant_id=eq.{tenant_id}"
                 
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
         response = requests.get(query_url, headers=headers)
         
         if response.status_code == 200:
-            rows = response.json()
-            for row in rows:
-                base_name = row.get("filename")
-                text_data = row.get("data")
-                # ✅ FIX: Fallback to row tenant_id if tenant_scope is empty
-                row_tenant = row.get("tenant_id") or tenant_scope or ""
+                rows = response.json()
+        for row in rows:
+            base_name = row.get("filename")
+            text_data = row.get("data")
+            # ✅ FIX: Always fall back to "global" (never "") so documents are
+            # never stored with an empty/NULL tenant_id in pgvector metadata.
+            row_tenant = row.get("tenant_id") or tenant_scope or "global"
                 
-                if check_if_embedded(base_name, datatype_label, row_tenant):
-                    continue
+            if check_if_embedded(base_name, datatype_label, row_tenant):
+                continue
                     
                 if text_data:
                     print(f"♻️ Chunking and embedding DB-only entry: {base_name} for tenant: {row_tenant}")
@@ -362,7 +505,7 @@ def preprocess(tenant_id=None, datatype_label="policies"):
                         split.metadata["tenant_id"] = row_tenant # ✅ Assigned correctly
                     md_header_splits.extend(splits)
 
-    process_database_only_entries(tenant_scope, datatype_label)
+    process_database_only_entries(tenant_id, tenant_scope, datatype_label)
 
     # ==========================================
     # 2. Vector Database Initialization (pgvector)
@@ -387,9 +530,15 @@ def preprocess(tenant_id=None, datatype_label="policies"):
             query_name="match_documents"
         )
 
+        # ✅ FIX: Only apply a tenant_id filter when the caller explicitly provided
+    # one. When tenant_id is None (global mode) we search *all* documents
+    # regardless of tenant, so no filter is applied. Using `tenant_id` (the
+    # original parameter) instead of `tenant_scope` (which now always has a
+    # value) preserves this behaviour while still guaranteeing that every
+    # stored document has a non-empty tenant_id in its metadata.
     filter_kwargs = {"datatype": datatype_label}
-    if tenant_scope:
-        filter_kwargs["tenant_id"] = tenant_scope
+    if tenant_id:
+        filter_kwargs["tenant_id"] = tenant_id
 
     retriever = vectorstore.as_retriever(
         search_kwargs={
@@ -656,7 +805,77 @@ def classify_query_intent(user_input: str) -> str:
 
 
 # ==========================================
-# 5d. HYBRID SEARCH (Vector + Keyword/BM25)
+# 5d. CONSOLIDATED ROUTING (1 LLM CALL)
+# ==========================================
+# Replaces the three separate cheap_llm calls that used to run for EVERY user
+# message (get_routing_decision + rewrite_search_query + classify_query_intent).
+# A single call returns stream routing, search-query rewriting, AND specific/
+# general intent together, saving ~2 sequential LLM round-trips (~4-8s).
+
+def route_and_plan(user_input, available_streams):
+    """One cheap_llm call that plans routing for a user message.
+
+    Returns a dict with:
+      - stream: chosen knowledge stream ("" when no streams exist)
+      - intent: "specific" or "general"
+      - rewritten_query: search-ready query string (falls back to user_input)
+    """
+    stream = ""
+    intent = "specific"
+    rewritten_query = ""
+
+    if not available_streams:
+        return {"stream": stream, "intent": "general", "rewritten_query": user_input}
+
+    stream_default = available_streams[0]
+    only_one = len(available_streams) == 1
+    streams_str = ", ".join(f'"{s}"' for s in available_streams)
+
+    router_prompt = f"""You are an intelligent routing assistant for a knowledge base whose available streams are: {streams_str}.
+
+Read the user query and respond with ONLY a JSON object containing exactly these three fields:
+1. "stream" — exactly ONE of the available streams ({streams_str}) that best matches the query.
+2. "intent" — "specific" if the user asks about concrete policy details (coverage limits, exclusions, deductibles, benefit amounts, terms, conditions, waiting periods, or any hard numbers/rules); otherwise "general" for a product overview, brochure info, or high-level explanation.
+3. "rewritten_query" — a precise search query using the exact terminology expected in that stream's documents. Do NOT answer the question, just rewrite it into search terms.
+
+Rules:
+- Respond ONLY with the JSON object. No markdown, no code fences, no extra text.
+- If only one stream exists ({streams_str}), "stream" must be exactly that stream.
+- Use exactly the string values given in the available streams.
+
+User query: "{user_input}"
+"""
+
+    try:
+        response = cheap_llm.invoke([HumanMessage(content=router_prompt)])
+        raw = extract_text(response.content)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            stream_raw = re.sub(r'[^a-z0-9_-]', '', str(data.get("stream", "")).strip().lower())
+            intent_raw = re.sub(r'[^a-z]', '', str(data.get("intent", "")).strip().lower())
+            intent = intent_raw if intent_raw in ("specific", "general") else "specific"
+            rq = str(data.get("rewritten_query", "")).strip()
+            if rq and len(rq) > 5:
+                rewritten_query = rq
+            if stream_raw:
+                stream = stream_raw
+    except Exception as e:
+        print(f"[route_and_plan] Error: {e}; using defaults")
+
+    if only_one:
+        stream = available_streams[0]
+    elif stream not in available_streams:
+        stream = stream_default
+    if not rewritten_query:
+        rewritten_query = user_input
+
+    print(f"\n[route_and_plan] stream={stream.upper()} intent={intent.upper()} rewritten={rewritten_query!r}")
+    return {"stream": stream, "intent": intent, "rewritten_query": rewritten_query}
+
+
+# ==========================================
+# 5e. HYBRID SEARCH (Vector + Keyword/BM25)
 # ==========================================
 
 def _supabase_keyword_search(query: str, datatype: str, tenant_id: str | None = None, k: int = 5) -> list:
@@ -699,10 +918,11 @@ def _supabase_keyword_search(query: str, datatype: str, tenant_id: str | None = 
     # In Supabase/postgREST: "or=..." handles the OR logic; separate URL params = AND logic
     query_params = f"select=id,content,metadata&or={urllib.parse.quote(keyword_conditions)}&limit={k}"
     
-    # Add metadata filter as separate URL parameter (AND with the OR conditions)
+        # Add metadata filter as separate URL parameter (AND with the OR conditions)
     query_params += f"&metadata->>datatype.eq.{datatype}"
-    if tenant_id:
-        query_params += f"&metadata->>tenant_id.eq.{tenant_id}"
+    # ✅ FIX: Always filter by tenant_id so NULL/empty-tenant documents are never
+    # returned. In global mode we explicitly search for the "global" bucket.
+    query_params += f"&metadata->>tenant_id.eq.{tenant_id or 'global'}"
     
     query_url = f"{SUPABASE_URL}/rest/v1/documents?{query_params}"
     
@@ -838,9 +1058,20 @@ def _parse_json_object(value):
     return {}
 
 
+_tenant_template_cache: dict = {}  # {tenant_id: (timestamp, template)}
+_TEMPLATE_TTL_SECONDS = 120
+
+
 def get_tenant_system_message_template(tenant_id: str | None = None):
     if not tenant_id:
         return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+
+    # TTL cache: tenant custom instructions rarely change; avoid a Supabase
+    # round-trip on every single chat message.
+    now = time.monotonic()
+    cached = _tenant_template_cache.get(tenant_id)
+    if cached and (now - cached[0]) < _TEMPLATE_TTL_SECONDS:
+        return cached[1]
 
     headers = {
         "apikey": SUPABASE_KEY,
@@ -868,6 +1099,7 @@ def get_tenant_system_message_template(tenant_id: str | None = None):
 TENANT CUSTOM INSTRUCTIONS:
 {custom_instruction.strip()}
 """
+            _tenant_template_cache[tenant_id] = (now, combined_template)
             return combined_template
             
     except Exception as exc:
@@ -890,6 +1122,34 @@ def _strip_xml_tags(text: str) -> str:
     cleaned = re.sub(r'<[^>]+>', '', text)
     # Collapse multiple newlines into at most 2
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
+
+
+def _clean_final_output(raw_text: str) -> str:
+    """Extract a clean, user-facing answer from the LLM output.
+
+    The final LLM no longer *prompts* for it, but models sometimes still emit
+    internal reasoning blocks like <thinking>/<reflection>. This removes the
+    ENTIRE block (tags and content) so users never see "user is asking about..."
+    or any other chain-of-thought text, and keeps only the actual answer.
+    """
+    if not raw_text:
+        return ""
+    # 1) If the model faithfully wrapped its answer, keep only that block.
+    match = re.search(r"<final_answer>(.*?)</final_answer>", raw_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # 2) Remove the FULL internal reasoning blocks (tags AND their content).
+    cleaned = re.sub(
+        r"<thinking>.*?</thinking>", "", raw_text, flags=re.DOTALL | re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r"<reflection>.*?</reflection>", "", cleaned, flags=re.DOTALL | re.IGNORECASE
+    )
+    # 3) Strip any leftover XML/HTML tags (malformed/closing tags, etc.).
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    # 4) Collapse runs of blank lines left behind.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
 # ==========================================
@@ -931,7 +1191,10 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             tool_map = {tool.name: tool for tool in all_available_tools}
             
             if tool_name in tool_map:
-                tool_output = tool_map[tool_name].invoke(tool_args)
+                try:
+                    tool_output = tool_map[tool_name].invoke(tool_args)
+                except Exception as exc:
+                    tool_output = f"The task '{tool_name}' needs more details before it can run: {exc}"
             else:
                 tool_output = f"Error: Tool '{tool_name}' not found."
 
@@ -946,7 +1209,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
             response_obj = heavy_llm.invoke(messages)
             return {
-                "response": extract_text(response_obj.content),
+                "response": _clean_final_output(extract_text(response_obj.content)),
                 "hitl_pending": False,
                 "tool_executed": tool_name,
                 "tool_output": tool_output,
@@ -968,8 +1231,11 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     # ==========================================
     
     # 🌟 NEW: Route the query dynamically based on actual folders!
+    # FIX: One consolidated cheap_llm call replaces the old 3-call routing chain
+    # (get_routing_decision + rewrite_search_query + classify_query_intent).
     available_streams = list(retrievers.keys())
-    chosen_stream = get_routing_decision(user_input, available_streams)
+    plan = route_and_plan(user_input, available_streams)
+    chosen_stream = plan["stream"]
     print(f"\n[AI Router selected knowledge base: {chosen_stream.upper()}]")
     
     active_retriever = retrievers.get(chosen_stream)
@@ -989,15 +1255,11 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     active_llm = llm_with_tools_local.get(chosen_stream) or llm_with_tools_local.get("_all", heavy_llm)
 
     # ==========================================
-    # IMPROVEMENT 1: QUERY REWRITING (Brain Layer)
+    # QUERY REWRITE + INTENT (from route_and_plan, 1 LLM call)
     # ==========================================
-    rewritten_query = rewrite_search_query(user_input, chosen_stream)
-    
-    # ==========================================
-    # IMPROVEMENT 3: HARD-CODED ROUTING (Stop Button)
-    # ==========================================
-    query_intent = classify_query_intent(user_input)
-    
+    query_intent = plan["intent"]
+    rewritten_query = plan["rewritten_query"]
+
     if query_intent == "specific":
         print(f"\n[Hard-Coded Router] Query classified as SPECIFIC - excluding general/overview documents")
     else:
@@ -1038,14 +1300,15 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             return None
 
         # Build list and log tenant ids for debugging
-        # ✅ FIX: Allow match if metadata tenant_id matches OR if tenant_id is missing/global
+        # 🔒 STRICT tenant isolation: only keep chunks whose metadata tenant_id
+        # exactly matches the current tenant. Chunks with missing/empty/global
+        # tenant ids are NOT used (they'd otherwise bleed into every tenant).
         filtered = []
         seen_tenants = set()
         for c in (all_chunks or []):
             t = chunk_tenant(c)
             seen_tenants.add(t)
-            # Match exact tenant, or allow global/empty tenant chunks if tenant matching is relaxed
-            if t == tenant_id or not t or t == "global":
+            if t == tenant_id:
                 filtered.append(c)
 
         print(f"[DEBUG] Retrieved tenants from retriever: {seen_tenants}; kept {len(filtered)} chunks for tenant: {tenant_id}")
@@ -1092,49 +1355,31 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     context_for_ai = "\n\n".join([doc.page_content for doc in relevant_chunks])
     
     # ==========================================
-    # 2b. CHEAP_LLM CONTEXT EXTRACTION (from advanced_prototype's extract_context_node)
+    # 2b. CONTEXT PREPARATION
     # ==========================================
-    print("\n[cheap_llm] Extracting relevant facts from retrieved context...")
-    extraction_prompt = f"""
-    You are an advanced analyst. Read the following source materials and extract only the facts, figures, 
-    statistics, and logical claims that are directly relevant to answering the question: "{user_input}".
-    
-    CRITICAL RULES:
-    1. Do not add any analysis, speculation, or answers. 
-    2. If the source material contains a Markdown table, YOU MUST PRESERVE THE TABLE FORMAT EXACTLY in your extraction. Do not convert comparison tables into bullet points.
-    3. For standard text, synthesize the raw facts into a clean, bulleted checklist.
-    
-    Source Material:
-    {context_for_ai}
-    """
-    try:
-        extraction_response = cheap_llm.invoke([HumanMessage(content=extraction_prompt)])
-        extracted_facts = extract_text(extraction_response.content)
-        print("[cheap_llm] Context extraction complete.")
-    except Exception as e:
-        print(f"[cheap_llm] Extraction failed, falling back to raw context: {e}")
-        extracted_facts = context_for_ai
-    
+    # FIX: Removed the separate cheap_llm context-extraction call. The retrieved
+    # chunks are now passed straight to the final LLM, saving one full LLM
+    # round-trip per message while keeping tables and raw figures intact.
+    # A generous cap keeps the prompt bounded without dropping relevant content.
+    print("\n[Gemini] Preparing retrieved context for the final LLM...")
+    extracted_facts = context_for_ai[:15000]
+
     # ==========================================
-    # 2c. HEAVY_LLM CoT GENERATION (from advanced_prototype's generate_response_node)
+    # 2c. FINAL ANSWER GENERATION
     # ==========================================
-    print("\n[heavy_llm] Generating response with Chain-of-Thought & Reflection...")
-    cot_system_prompt = """
-    You are an elite research AI. Your task is to solve the user's query using only the provided facts.
-    You must format your internal thinking processes using structured XML blocks:
-    
-    <thinking>
-    Step-by-step logic, drawing lines between the facts and the user's query. Discuss potential edge cases or assumptions.
-    </thinking>
-    
-    <reflection>
-    Analyze your reasoning in the thinking block. Are there logical gaps? Are there contradictions with the factual context?
-    Did you assume something not directly stated in the context? Refine your strategy if necessary.
-    </reflection>
-    
-    <final_answer>
-    The ultimate, clear, complete, and correct output written for the user. Do not reference the XML blocks here.
-    </final_answer>
+    # FIX: Removed the forced Chain-of-Thought XML (<thinking>/<reflection>/
+    # <final_answer>) prompt. It produced long preambles before any answer text
+    # (slower) and its reasoning blocks leaked into the chat UI. The model now
+    # writes the answer directly; any stray reasoning blocks are still stripped
+    # defensively by _clean_final_output().
+    print("\n[heavy_llm] Generating final response...")
+    final_system_prompt = """
+    You are an elite research AI. Your task is to answer the user's query using ONLY the provided facts.
+
+    Rules:
+    1. Answer directly and completely. Do NOT output any internal reasoning, chain-of-thought, <thinking>, <reflection>, or any other XML/markup tags.
+    2. If the provided facts contain a comparison table, preserve the table format exactly.
+    3. Do not invent facts not present in the provided facts. If the facts don't contain an answer, say so clearly.
     """
     
     cot_user_prompt = f"""
@@ -1144,19 +1389,38 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     {extracted_facts}
     """
     
-    # UPDATED: Instruct the AI to STOP talking and call the tool when data is ready
+    # Give the model a concrete list of the tenant's tasks so it knows exactly
+    # which tools exist and what arguments each one needs.
+    task_summary_lines = []
+    for _tools in toolkits_local.values():
+        for tool in _tools:
+            try:
+                arg_names = ", ".join((tool.args or {}).keys()) or "none"
+            except Exception:
+                arg_names = "see tool schema"
+            task_summary_lines.append(f"- {tool.name}: {tool.description} (required args: {arg_names})")
+    task_summary = "\n".join(task_summary_lines) or "No tasks are registered yet."
+
+    # Instruct the AI when to call a tool vs. ask a clarifying question.
     turn_payload = f"""
-    
-    CRITICAL RULES FOR MULTI-STEP ACTIONS:
-    1. DATA GATHERING: Find a highlight of the user's words that may refer to tasks listed. Point out the task.
-    2. PARAMETER GATHERING: Ask the user for parameters according to the task you believe is being addressed.
-    3. Because of the security gate, do NOT perform the tool call yet if you are just thinking. Only output the tool call when you are ready to execute.
+
+    AVAILABLE TASKS YOU CAN EXECUTE:
+    {task_summary}
+
+    CRITICAL RULES FOR TASK ACTIONS:
+    1. EXECUTE ONLY ON CLEAR INTENT. Call a task tool ONLY when the user clearly wants you to DO that task now (imperative/goal language: "initiate statarb", "please start X", "run X", "sign me up"). A mere mention of a task name — asking what it does, whether it's available, whether it's a good fit, how it works, or discussing its parameters — is NOT a request to execute. Answer those conversationally instead.
+    2. DON'T GUESS TASKS. Never call a tool just because a keyword or similar-sounding topic appears, or because the task was part of past conversation. If you are unsure whether the user wants execution, do NOT call the tool.
+    3. When you DO determine the user wants execution, fill each required argument in this order: (a) from the user's current message, (b) from the conversation history, (c) from the KNOWN USER FACTS / profile above. Then call the tool right away — do not stall with a wall of questions.
+    4. ONLY ask the user for an argument if it is truly required and still unknown after steps above. Ask for ALL missing arguments in ONE short message — never interrogate one at a time, and never repeat something the user already told you.
+    5. Because of the security gate, only output the actual tool call when you are ready to execute (never while merely planning or explaining).
     """
     
     # Retrieve per-tenant session history
     session_history = get_session_history(tenant_id, customer_id)
-    messages = [get_dynamic_system_prompt(tenant_id, customer_id)] + session_history.messages + [
-        SystemMessage(content=cot_system_prompt),
+    # Trim history so the prompt doesn't grow unboundedly over a long chat.
+    history_messages = session_history.messages[-8:]
+    messages = [get_dynamic_system_prompt(tenant_id, customer_id)] + history_messages + [
+        SystemMessage(content=final_system_prompt),
         HumanMessage(content=cot_user_prompt + turn_payload)
     ]
     
@@ -1229,7 +1493,10 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             tool_map = {tool.name: tool for tool in all_available_tools}
             
             if tool_name in tool_map:
-                tool_output = tool_map[tool_name].invoke(tool_args)
+                try:
+                    tool_output = tool_map[tool_name].invoke(tool_args)
+                except Exception as exc:
+                    tool_output = f"The task '{tool_name}' needs more details before it can run: {exc}"
             else:
                 tool_output = f"Error: Tool '{tool_name}' not found."
             
@@ -1240,7 +1507,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
             response_obj = heavy_llm.invoke(messages)
             return {
-                "response": extract_text(response_obj.content),
+                "response": _clean_final_output(extract_text(response_obj.content)),
                 "hitl_pending": False,
                 "tool_executed": tool_name,
                 "tool_output": tool_output,
@@ -1248,15 +1515,9 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
 
     # If it's just a general question with no tool intent, reply normally
     full_output = extract_text(response_obj.content)
-    
-    # Extract final_answer from CoT XML blocks (like advanced_prototype does)
-    final_answer_match = re.search(r"<final_answer>(.*?)</final_answer>", full_output, re.DOTALL)
-    if final_answer_match:
-        raw_response = final_answer_match.group(1).strip()
-    else:
-        # FIX 5: If XML parsing failed (model forgot closing tags), strip all XML
-        # tags from the output so users never see raw <thinking>/<reflection> blocks.
-        raw_response = _strip_xml_tags(full_output)
+    # FIX: Always run output cleaning so <thinking>/<reflection> content can
+    # never blend into the user-visible answer (see _clean_final_output).
+    raw_response = _clean_final_output(full_output)
     
     session_history.add_user_message(user_input)
     session_history.add_ai_message(raw_response)
@@ -1381,8 +1642,23 @@ def create_dynamic_tool(task_def):
     method = task_def["method"].upper()
     req_args = task_def.get("required_args", [])
 
-    # FIX 1: Use `Any` instead of `str` so the LLM can output native floats and booleans natively
-    fields = {arg: (Any, Field(..., description=f"The {arg} required for the request")) for arg in req_args}
+    # FIX 1: Use `Any` instead of `str` so the LLM can output native floats and booleans natively.
+    # The description guides the model to source values from context / memory instead of
+    # interrogating the user for things it already knows.
+    fields = {
+        arg: (
+            Any,
+            Field(
+                ...,
+                description=(
+                    f"Value for '{arg}'. If the user did not state it in their current message, "
+                    "infer it from the conversation history or the user's known profile. "
+                    "Only ask the user if it genuinely cannot be determined."
+                ),
+            ),
+        )
+        for arg in req_args
+    }
     args_schema = create_model(f"{name}Schema", **fields)
 
     def tool_execution(**kwargs):
@@ -1494,24 +1770,42 @@ def build_toolkits_for_tenant(tenant_id: str | None):
     return toolkits_local, llm_with_tools_local
 
 
+_retriever_cache: dict = {}  # {tenant_id: (timestamp, retrievers)}
+_RETRIEVER_TTL_SECONDS = 60
+
+
 def get_retrievers_for_tenant(tenant_id: str | None):
     """Scans storage for each discovered datatype and runs preprocess() so any
     PDFs that haven't been parsed/embedded yet actually get sent through
     LlamaParse and inserted into the 'documents' vector table. preprocess()
     already skips files that are already embedded (via check_if_embedded),
     so this is safe to call every time - it's a no-op network check for
-    files that were already processed, and a real parse for new ones."""
+    files that were already processed, and a real parse for new ones.
+
+    Since the discovery/embedding checks are network calls, the result is
+    cached for a short TTL so consecutive chat messages don't repeat the
+    same Supabase scans on every request. New uploads still get picked up
+    within the TTL window."""
+    key = tenant_id or "global"
+    now = time.monotonic()
+    cached = _retriever_cache.get(key)
+    if cached and (now - cached[0]) < _RETRIEVER_TTL_SECONDS:
+        return cached[1]
+
     discovered = discover_datatypes(tenant_id)
     retrievers = {}
 
     for dt in discovered:
         retrievers[dt] = preprocess(tenant_id=tenant_id, datatype_label=dt)
 
+    _retriever_cache[key] = (now, retrievers)
     return retrievers
 
 def discover_datatypes(tenant_id: str | None):
     """Discover tenant datatypes from storage folders and indexed database rows."""
-    tenant_scope = tenant_id or ""
+    # ✅ FIX: Use "global" instead of "" so the storage path and any downstream
+    # operations never deal with an empty tenant scope.
+    tenant_scope = tenant_id or "global"
     bucket_name = os.getenv("SUPABASE_BUCKET", "customer-service-provider")
     datatypes = set()
 

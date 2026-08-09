@@ -20,6 +20,7 @@ import {
 
 // Supabase
 import { createClient } from '@/utils/supabase/client'
+import { resolveTenantId } from '@/lib/tenant'
 
 // Components
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
@@ -39,6 +40,35 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+// ── Fix: sanitize + truncate file names before they hit Supabase storage/URLs ──
+// Long file names bloat the storage path, and names with spaces, &, #, % or
+// parentheses break both the storage API and the backend's `filename=eq.` queries.
+// We normalize the name once at upload time so it's safe everywhere downstream.
+const MAX_BASE_LENGTH = 60
+
+function sanitizeStorageName(fileName: string): string {
+  // Keep only the last path segment (defensive against path-like names).
+  const clean = fileName.split(/[\\/]/).pop() || 'file'
+  const dot = clean.lastIndexOf('.')
+  const base = dot > 0 ? clean.slice(0, dot) : clean
+  const ext = dot > 0 ? clean.slice(dot) : ''
+
+  // Replace problem characters with underscores, collapse whitespace, clamp length.
+  let safeBase = base
+    .replace(/[^\w\-_. ]+/g, '_') // non word/dash/dot/space -> '_'
+    .trim()
+    .replace(/\s+/g, '_') // whitespace runs -> '_'
+    .replace(/_+/g, '_')
+    .replace(/^\.+/, '') // no leading dots
+    .slice(0, MAX_BASE_LENGTH)
+    .replace(/[_\-]+$/, '') // no trailing separators
+
+  // Keep a sane, single extension; default to .pdf if it's weird.
+  const safeExt = ext && ext.length <= 11 && /^\.[A-Za-z0-9]+$/.test(ext) ? ext : '.pdf'
+
+  return `${safeBase || 'file'}${safeExt}`
+}
+
 // NEW: light client-side guard before we ever call the webhook
 function isValidUrl(value: string) {
   try {
@@ -49,11 +79,12 @@ function isValidUrl(value: string) {
   }
 }
 
-export default function UploadPage() {
+export function KnowledgeBasePanel({ embedded = false }: { embedded?: boolean } = {}) {
   const router = useRouter()
 
   // Auth & Profile State
   const [userId, setUserId] = useState<string | null>(null)
+  const [tenantId, setTenantId] = useState<string | null>(null)
   const [tenantName, setTenantName] = useState<string>('there')
   const [checkingUser, setCheckingUser] = useState(true)
 
@@ -221,6 +252,9 @@ export default function UploadPage() {
       }
 
       setUserId(user.id)
+      // The tenant is the workspace (shared across admin + team members), NOT the user id.
+      const tid = await resolveTenantId(user.id)
+      setTenantId(tid)
 
       // 1. Fetch exact tenant_name matching the dashboard requirements
       const { data: profile, error: profileError } = await supabase
@@ -245,20 +279,20 @@ export default function UploadPage() {
       }
 
       // 2. Reflect what's truly inside the supabase storage on load
-      await refreshDatatypes(user.id, true)
+      await refreshDatatypes(tid, true)
       setCheckingUser(false)
     }
 
     loadUser()
   }, [router, refreshDatatypes])
 
-  // When datatype or userId changes, fetch both the static files and the linked sources
+  // When datatype or tenantId changes, fetch both the static files and the linked sources
   useEffect(() => {
-    if (userId && datatype) {
-      refreshFiles(userId, datatype)
-      refreshLinkedFiles(userId, datatype) // NEW
+    if (tenantId && datatype) {
+      refreshFiles(tenantId, datatype)
+      refreshLinkedFiles(tenantId, datatype) // NEW
     }
-  }, [userId, datatype, refreshFiles, refreshLinkedFiles])
+  }, [tenantId, datatype, refreshFiles, refreshLinkedFiles])
 
   const pickFile = useCallback((f: File | null) => {
     if (!f) return
@@ -331,6 +365,10 @@ export default function UploadPage() {
       setStatus({ kind: 'error', message: 'Please select or add a datatype.' })
       return
     }
+    if (!tenantId) {
+      setStatus({ kind: 'error', message: 'Unable to resolve your workspace. Please sign in again.' })
+      return
+    }
     setLoading(true)
     setStatus({ kind: 'info', message: 'Uploading to storage…' })
 
@@ -345,8 +383,11 @@ export default function UploadPage() {
       }
 
       const bucket = process.env.NEXT_PUBLIC_SUPABASE_BUCKET || 'customer-service-provider'
-      // Scoped exactly as requested: tenant/datatype/file.pdf
-      const storagePath = `${user.id}/${datatype}/${file.name}`
+      // Scoped to the WORKSPACE tenant id (shared by admin + developers), not the user id.
+      // Fix: sanitize/truncate the file name so long or special-character names
+      // can't break the storage path or the backend's filename queries.
+      const safeFileName = sanitizeStorageName(file.name)
+      const storagePath = `${tenantId}/${datatype}/${safeFileName}`
 
       const { error } = await supabase.storage.from(bucket).upload(storagePath, file, {
         cacheControl: '3600',
@@ -360,8 +401,8 @@ export default function UploadPage() {
       setFile(null)
 
       // Refresh datatypes and the current files view
-      await refreshDatatypes(user.id, true)
-      await refreshFiles(user.id, datatype)
+      await refreshDatatypes(tenantId, true)
+      await refreshFiles(tenantId, datatype)
     } catch (error) {
       setStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Upload failed' })
     } finally {
@@ -370,7 +411,7 @@ export default function UploadPage() {
   }
 
   async function handleDeleteFile(fileName: string) {
-    if (!userId || !datatype) return
+    if (!tenantId || !datatype) return
     if (!confirm(`Are you sure you want to delete "${fileName}"? This action cannot be undone.`)) return
 
     setStatus({ kind: 'info', message: `Deleting ${fileName}...` })
@@ -378,7 +419,7 @@ export default function UploadPage() {
     try {
       const supabase = createClient()
       const bucket = process.env.NEXT_PUBLIC_SUPABASE_BUCKET || 'customer-service-provider'
-      const storagePath = `${userId}/${datatype}/${fileName}`
+      const storagePath = `${tenantId}/${datatype}/${fileName}`
       console.log("Attempting to delete:", storagePath) // Add this line!
 
       // Capture 'data' from the remove call
@@ -398,7 +439,7 @@ export default function UploadPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            tenant_id: userId,
+            tenant_id: tenantId,
             datatype,
             file_name: fileName,
           }),
@@ -414,9 +455,9 @@ export default function UploadPage() {
       setStatus({ kind: 'success', message: `Deleted ${fileName} successfully.` })
 
       // Refresh files list after deletion
-      await refreshFiles(userId, datatype)
+      await refreshFiles(tenantId, datatype)
       // Refresh datatypes in case the folder was left entirely empty and removed
-      await refreshDatatypes(userId, true)
+      await refreshDatatypes(tenantId, true)
     } catch (error) {
       setStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Failed to delete file' })
     }
@@ -454,15 +495,19 @@ export default function UploadPage() {
         return
       }
 
-      const res = await fetch(N8N_INGEST_WEBHOOK_URL, {
+            const res = await fetch(N8N_INGEST_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // From your handleAddLink function:
         body: JSON.stringify({
           url: linkUrl,
           datatype, // <-- This passes the actively selected folder ('policies')
           filename: linkFilename.trim() || undefined,
           access_token: session.access_token,
+          // ✅ FIX: Pass the workspace tenant_id so n8n writes the row with the
+          // correct tenant identifier. Without this, n8n inserts a row with
+          // tenant_id = NULL, which then gets vectorized as tenant_id = "" in
+          // pgvector — causing orphaned documents that survive account deletion.
+          tenant_id: tenantId,
         }),
       })
 
@@ -478,7 +523,7 @@ export default function UploadPage() {
 
       // The webhook only responds after the row is written, so this should
       // already show the new entry.
-      if (userId) await refreshLinkedFiles(userId, datatype)
+      if (tenantId) await refreshLinkedFiles(tenantId, datatype)
     } catch (error) {
       setLinkStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Failed to add link' })
     } finally {
@@ -489,7 +534,7 @@ export default function UploadPage() {
   // NEW: remove a linked (URL-based) source. This only deletes the indexed row —
   // it does not touch the original file at its source URL.
   async function handleDeleteLinkedFile(row: any) {
-    if (!userId) return
+    if (!tenantId) return
     if (!confirm(`Remove "${row.filename}" from the knowledge base? This only removes the indexed copy — the source link is untouched.`)) return
 
     try {
@@ -498,7 +543,7 @@ export default function UploadPage() {
       if (error) throw error
 
       setLinkStatus({ kind: 'success', message: `Removed ${row.filename}.` })
-      await refreshLinkedFiles(userId, datatype)
+      await refreshLinkedFiles(tenantId, datatype)
     } catch (error) {
       setLinkStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Failed to remove link' })
     }
@@ -507,12 +552,16 @@ export default function UploadPage() {
   const activeStatus = mode === 'file' ? status : linkStatus
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-background">
-      <PageBackground />
-      {/* Dynamic Nav mimicking the Dashboard */}
-      <DashboardNav tenantName={tenantName} />
+    <div className={embedded ? 'h-full overflow-y-auto' : 'relative min-h-screen overflow-hidden bg-background'}>
+      {!embedded && (
+        <>
+          <PageBackground />
+          {/* Dynamic Nav mimicking the Dashboard */}
+          <DashboardNav tenantName={tenantName} />
+        </>
+      )}
 
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:py-10">
+      <main className={embedded ? '' : 'mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:py-10'}>
         <div>
           <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Knowledge Base</p>
           <h1 className="mt-1 font-display text-3xl font-bold tracking-tight text-balance">Upload knowledge</h1>
@@ -530,7 +579,7 @@ export default function UploadPage() {
           </div>
         ) : (
           <div className="mt-8 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-            <div className="space-y-6">
+            <div className="min-w-0 space-y-6">
               <Card>
                 <CardContent className="pt-6">
                   <form onSubmit={mode === 'file' ? handleUpload : handleAddLink} className="space-y-6">
@@ -610,13 +659,15 @@ export default function UploadPage() {
                             <FileText className="size-5" />
                           </span>
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium">{file.name}</p>
-                            <p className="text-xs text-muted-foreground">{formatSize(file.size)}</p>
+                            <p className="truncate text-sm font-medium" title={file.name}>{file.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatSize(file.size)}{' • stored as '}{sanitizeStorageName(file.name)}
+                            </p>
                           </div>
                           <button
                             type="button"
                             onClick={() => setFile(null)}
-                            className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                            className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                             aria-label="Remove file"
                           >
                             <X className="size-4" />
@@ -783,7 +834,7 @@ export default function UploadPage() {
             </div>
 
             {/* Sidebar */}
-            <div className="space-y-6">
+            <div className="min-w-0 space-y-6">
 
               {/* Existing Folders/Datatypes Card */}
               <Card>
@@ -800,12 +851,12 @@ export default function UploadPage() {
                       key={dt}
                       className="flex items-center justify-between rounded-lg border border-border/60 bg-secondary/30 px-3 py-2"
                     >
-                      <span className="flex items-center gap-2 text-sm font-medium">
-                        <FolderTree className="size-4 text-muted-foreground" />
-                        {dt}
+                      <span className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
+                        <FolderTree className="size-4 shrink-0 text-muted-foreground" />
+                        <span className="truncate" title={dt}>{dt}</span>
                       </span>
                       {dt === datatype && (
-                        <span className="rounded-full bg-primary/12 px-2 py-0.5 text-xs font-medium text-primary">
+                        <span className="ml-2 shrink-0 rounded-full bg-primary/12 px-2 py-0.5 text-xs font-medium text-primary">
                           selected
                         </span>
                       )}
@@ -847,7 +898,7 @@ export default function UploadPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="size-8 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                          className="size-8 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                           onClick={() => handleDeleteFile(f.name)}
                           title="Delete file"
                         >
@@ -906,7 +957,7 @@ export default function UploadPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="size-8 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                          className="size-8 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                           onClick={() => handleDeleteLinkedFile(row)}
                           title="Remove linked source"
                         >
@@ -925,8 +976,8 @@ export default function UploadPage() {
                   </p>
                   <code className="block break-all rounded-lg border border-border/60 bg-background px-3 py-2 font-mono text-xs text-muted-foreground">
                     {mode === 'file'
-                      ? `${userId || 'tenant-id'}/${datatype || 'datatype'}/${file?.name ?? 'your-file.pdf'}`
-                      : `customer-service-provider row: tenant_id=${userId || 'tenant-id'}, datatype=${datatype || 'datatype'}, filename=${linkFilename || '(from URL)'}`}
+                      ? `${tenantId || 'tenant-id'}/${datatype || 'datatype'}/${file ? sanitizeStorageName(file.name) : 'your-file.pdf'}`
+                      : `customer-service-provider row: tenant_id=${tenantId || 'tenant-id'}, datatype=${datatype || 'datatype'}, filename=${linkFilename || '(from URL)'}`}
                   </code>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {mode === 'file'

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file
+from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file, delete_all_tenant_data
 from telemetry_sdk import get_telemetry, reset_telemetry
 from supabase import create_client, Client
 from hitl import fetch_hitl_config, evaluate_hitl, HITLDecision, detect_sentiment, fetch_task_names
@@ -51,13 +51,17 @@ class DeleteKnowledgeRequest(BaseModel):
 async def ingest_endpoint(request: IngestRequest, background_tasks: BackgroundTasks):
     """Trigger preprocessing in the background."""
     try:
-        # Pass the heavy lifting to a background thread
+        # ✅ FIX: Guard against empty tenant_id. An empty string was previously
+        # passed straight through to preprocess(), resulting in tenant_scope=""
+        # and documents stored with tenant_id="" (NULL in JSONB). Default to
+        # "global" so every vectorized document always carries a non-empty
+        # tenant_id.
+        effective_tenant_id = request.tenant_id or "global"
         background_tasks.add_task(
             preprocess,
-            tenant_id=request.tenant_id,
+            tenant_id=effective_tenant_id,
             datatype_label=request.datatype
         )
-        # Immediately return success to the client/n8n
         return {"status": "ok", "message": "Ingestion started in the background"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -181,6 +185,25 @@ async def delete_knowledge_endpoint(request: DeleteKnowledgeRequest):
     """Delete the indexed knowledge rows for a file that was removed from storage."""
     try:
         result = delete_knowledge_file(request.tenant_id, request.datatype, request.file_name)
+        return {"status": "ok", **result}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+class AccountDeleteRequest(BaseModel):
+    tenant_id: str
+
+
+@app.post("/account/delete")
+async def account_delete_endpoint(request: AccountDeleteRequest):
+    """
+    Delete ALL knowledge data for a tenant (workspace): raw parsed rows,
+    pgvector documents, and storage files. Called when an account/workspace is
+    deleted so no orphaned data (which could later bleed into a new tenant)
+    is left in the database.
+    """
+    try:
+        result = delete_all_tenant_data(request.tenant_id)
         return {"status": "ok", **result}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
@@ -496,5 +519,178 @@ async def get_telemetry_data(tenant_id: str):
             "metrics": metrics,
             "evaluations": evaluations,
         }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ──────────────────────────────────────────────
+# Dashboard Widget Endpoints
+# ──────────────────────────────────────────────
+
+class DashboardLayoutRequest(BaseModel):
+    layout: list  # list of widget configs with positions
+
+
+@app.get("/dashboard/layout/{tenant_id}")
+async def get_dashboard_layout(tenant_id: str):
+    """
+    Fetch the saved dashboard widget layout for a given tenant.
+    Returns the layout list, or an empty list if no layout is saved yet.
+    """
+    try:
+        SUPABASE_KEY = os.getenv("SUPADB_API")
+        rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+
+        if not rest_url or not SUPABASE_KEY:
+            return {"status": "error", "message": "Database not configured"}
+
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+
+        query_url = f"{rest_url}?datatype=eq.dashboard_config&tenant_id=eq.{tenant_id}"
+        response = requests.get(query_url, headers=headers, timeout=10)
+
+        if response.status_code == 200:
+            rows = response.json()
+            if rows:
+                raw = rows[0].get("data", {})
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except json.JSONDecodeError:
+                        raw = {"layout": []}
+                return {"status": "ok", "layout": raw.get("layout", []), "version": raw.get("version", 1)}
+
+        return {"status": "ok", "layout": [], "version": 1}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/dashboard/layout/{tenant_id}")
+async def save_dashboard_layout(tenant_id: str, request: DashboardLayoutRequest):
+    """
+    Save (upsert) the dashboard widget layout for a given tenant.
+    Stores in the customer-service-provider table with datatype='dashboard_config'.
+    """
+    try:
+        SUPABASE_KEY = os.getenv("SUPADB_API")
+        rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+
+        if not rest_url or not SUPABASE_KEY:
+            return {"status": "error", "message": "Database not configured"}
+
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+
+        payload = {
+            "datatype": "dashboard_config",
+            "filename": "dashboard_config",
+            "tenant_id": tenant_id,
+            "data": {"tenant_id": tenant_id, "layout": request.layout, "version": 1},
+        }
+
+        # Try insert first
+        response = requests.post(rest_url, json=payload, headers=headers, timeout=10)
+
+        if response.status_code in (200, 201):
+            return {"status": "ok", "message": "Dashboard layout saved"}
+
+        # Conflict = row already exists for this tenant, try update
+        if response.status_code == 409 or "23505" in response.text or "duplicate" in response.text.lower():
+            patch_payload = {"data": payload["data"]}
+            patch_response = requests.patch(
+                f"{rest_url}?datatype=eq.dashboard_config&tenant_id=eq.{tenant_id}",
+                json=patch_payload,
+                headers=headers,
+                timeout=10,
+            )
+            if patch_response.status_code in (200, 204):
+                return {"status": "ok", "message": "Dashboard layout updated"}
+            return {"status": "error", "message": f"Update failed: {patch_response.text}"}
+
+        return {"status": "error", "message": f"Save failed: {response.text}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/dashboard/widget-data/{tenant_id}")
+async def get_dashboard_widget_data(tenant_id: str):
+    """
+    Fetch aggregated metric data for dashboard widgets.
+    Pulls from telemetry_metrics, telemetry_events, telemetry_evaluations,
+    and conversations tables — returns a dict keyed by data source type.
+    """
+    try:
+        SUPABASE_KEY = os.getenv("SUPADB_API")
+        rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+
+        if not rest_url or not SUPABASE_KEY:
+            return {"status": "error", "message": "Database not configured"}
+
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+
+        result: dict = {
+            "status": "ok",
+            "tenant_id": tenant_id,
+            "conversations": [],
+            "telemetry_metrics": [],
+            "telemetry_events": [],
+            "telemetry_evaluations": [],
+        }
+
+        # Fetch conversation data
+        try:
+            resp = requests.get(
+                f"{rest_url}?datatype=eq.conversations&tenant_id=eq.{tenant_id}&order=timestamp.desc&limit=500",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code == 200:
+                result["conversations"] = [r.get("data", {}) for r in resp.json()]
+        except Exception:
+            pass
+
+        # Fetch telemetry metrics
+        try:
+            resp = requests.get(
+                f"{rest_url}?datatype=eq.telemetry_metrics&tenant_id=eq.{tenant_id}&order=timestamp.desc&limit=500",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code == 200:
+                result["telemetry_metrics"] = [r.get("data", {}) for r in resp.json()]
+        except Exception:
+            pass
+
+        # Fetch telemetry events
+        try:
+            resp = requests.get(
+                f"{rest_url}?datatype=eq.telemetry_events&tenant_id=eq.{tenant_id}&order=timestamp.desc&limit=500",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code == 200:
+                result["telemetry_events"] = [r.get("data", {}) for r in resp.json()]
+        except Exception:
+            pass
+
+        # Fetch telemetry evaluations
+        try:
+            resp = requests.get(
+                f"{rest_url}?datatype=eq.telemetry_evaluations&tenant_id=eq.{tenant_id}&order=timestamp.desc&limit=100",
+                headers=headers, timeout=10,
+            )
+            if resp.status_code == 200:
+                result["telemetry_evaluations"] = [r.get("data", {}) for r in resp.json()]
+        except Exception:
+            pass
+
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

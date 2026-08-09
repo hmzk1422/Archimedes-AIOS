@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
-import { Plus, Loader2, Trash2, Save, FileJson, Shield, Puzzle } from 'lucide-react'
+import { Plus, Loader2, Trash2, Save, FileJson, Shield, Puzzle, ListTodo, Workflow, Bot, Database } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -11,6 +11,10 @@ import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import ExtensionPage from '@/components/dashboard/extensionpage'
 import { PageBackground } from '@/components/page-background'
+import { NodePalette } from '@/components/dashboard/node-palette'
+import { AICoderWidget } from '@/components/dashboard/widgets/ai-coder-widget'
+import { KnowledgeBasePanel } from '@/components/knowledge-base/KnowledgeBasePanel'
+import type { DashboardWidget } from '@/components/dashboard/widgets/types'
 
 // 1. Define the exact structure based on your 6 parameters
 type AgentTask = {
@@ -38,6 +42,20 @@ export default function TasksPage() {
   const [rowId, setRowId] = useState<string | null>(null) // Track the DB row ID if it exists
   const [tenantName, setTenantName] = useState<string>('Workspace') // Track tenant name for nav
   const [isDirty, setIsDirty] = useState(false) // Unsaved local edits not yet written to Supabase
+  const [activeSection, setActiveSection] = useState<'tasks' | 'workflow' | 'ai-coder' | 'knowledge'>('tasks')
+  const [workflowNodesOpen, setWorkflowNodesOpen] = useState(false)
+
+  // AI Coder widget state
+  const [aiCoderWidget] = useState<DashboardWidget>({
+    id: 'ai-coder-widget',
+    type: 'ai-coder',
+    x: 0,
+    y: 0,
+    w: 3,
+    h: 3,
+    config: { title: 'AI Widget Builder' },
+    dataSource: { nodeType: 'telemetry_metrics' },
+  })
 
   // Form State
   const [formData, setFormData] = useState({
@@ -243,23 +261,87 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-background">
+    <div className="relative flex h-screen flex-col overflow-hidden bg-background">
       <PageBackground />
       <DashboardNav tenantName={tenantName} />
-      <main className="mx-auto max-w-5xl px-4 py-8">
+      <main className="flex min-h-0 flex-1 overflow-hidden">
 
-        <div className="mb-8">
-          <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Configuration</p>
-          <h1 className="mt-1 font-display text-3xl font-bold tracking-tight">Agent Tasks Map</h1>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Manage the JSON API definitions stored in the database.
-          </p>
-        </div>
+        {/* Sidebar — switch between Agent Tasks and Agentic Workflow */}
+        <aside className="flex w-52 shrink-0 flex-col border-r border-border/60 bg-card/60 backdrop-blur-md">
+          <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
+            <Puzzle className="size-4 text-primary" />
+            <span className="text-sm font-semibold text-foreground">Actions</span>
+          </div>
+          <nav className="flex flex-1 flex-col gap-1 p-2">
+            {([
+              { key: 'tasks' as const, label: 'Agent Tasks', icon: ListTodo },
+              { key: 'workflow' as const, label: 'Agentic Workflow', icon: Workflow },
+              { key: 'ai-coder' as const, label: 'AI Coder', icon: Bot },
+              { key: 'knowledge' as const, label: 'Knowledge Base', icon: Database },
+            ]).map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setActiveSection(key)}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                  activeSection === key
+                    ? 'bg-secondary text-foreground'
+                    : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground'
+                )}
+              >
+                <Icon className="size-4" />
+                {label}
+              </button>
+            ))}
+          </nav>
+          <div className="border-t border-border/60 px-4 py-3">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Tip</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/80">
+              Select a node and press Ctrl+C then Ctrl+V to duplicate it — just like Activepieces.
+            </p>
+          </div>
+        </aside>
 
-        {checkingUser ? (
-          <Loader2 className="animate-spin mx-auto mt-10 text-primary" />
-        ) : (
-          <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr]">
+        {/* Content */}
+        <div className="min-w-0 flex-1 overflow-hidden">
+          {checkingUser ? (
+            <div className="flex h-full items-center justify-center">
+              <Loader2 className="animate-spin size-8 text-primary" />
+            </div>
+          ) : activeSection === 'workflow' ? (
+            <div className="h-full overflow-hidden p-6">
+              <ExtensionPage fullScreen />
+            </div>
+          ) : activeSection === 'ai-coder' ? (
+            <div className="h-full overflow-y-auto p-6">
+              <div className="mx-auto max-w-4xl">
+                <div className="mb-6">
+                  <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">AI Tools</p>
+                  <h1 className="mt-1 font-display text-3xl font-bold tracking-tight">AI Widget Builder</h1>
+                  <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                    Describe the dashboard widget you want to create, and AI will generate it for you.
+                  </p>
+                </div>
+                <AICoderWidget widget={aiCoderWidget} />
+              </div>
+            </div>
+          ) : activeSection === 'knowledge' ? (
+            <div className="h-full overflow-y-auto">
+              <KnowledgeBasePanel embedded />
+            </div>
+          ) : (
+            <div className="h-full overflow-y-auto">
+              <div className="mx-auto max-w-5xl px-6 py-8">
+                <div className="mb-8">
+                  <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Configuration</p>
+                  <h1 className="mt-1 font-display text-3xl font-bold tracking-tight">Agent Tasks Map</h1>
+                  <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                    Manage the JSON API definitions stored in the database.
+                  </p>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-[1fr_1.5fr]">
 
             {/* Form to stage a new task locally */}
             <Card className="h-fit">
@@ -397,12 +479,11 @@ export default function TasksPage() {
                 )}
               </CardContent>
             </Card>
-            <div className="lg:col-span-2">
-                <ExtensionPage />
+                </div>
+              </div>
             </div>
-
-          </div>
-        )}
+          )}
+        </div>
       </main>
     </div>
   )
