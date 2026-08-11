@@ -187,8 +187,12 @@ function resolveCollisions(
               {WidgetComponent ? <WidgetComponent widget={widget} data={data} /> : null}
             </div>
             {/* Resize handle (bottom-right corner) */}
-            <div
-              onPointerDown={startResize}
+                        <div
+              onPointerDown={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                startResize(e)
+              }}
               title="Drag to resize"
               className="absolute bottom-1 right-1 z-30 flex size-4 cursor-se-resize items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
             >
