@@ -88,6 +88,88 @@ def extract_text(content):
     return str(content)
 
 # ==========================================
+# 1c. AI Mode Helpers
+# ==========================================
+# "mode" is the tenant's active AI mode (e.g. customer_support, sales, billing).
+# "datatype" is the KB/task/instruction slice within that mode.
+
+DEFAULT_AI_MODES = [
+    {"active": "customer_support", "label": "Customer Support"},
+    {"active": "sales", "label": "Sales"},
+    {"active": "billing", "label": "Billing"},
+# ✅ FIX: Always scope the query to a specific tenant_id (defaulting to \"global\")\n    # so we never accidentally match a row from a different tenant.\n    query_parts.append(f\"tenant_id=eq.{urllib.parse.quote(tenant_id or 'global', safe='')}\")\n    query_url = f\"{rest_url}?{'&'.join(query_parts)}&select=id\"\n     \n    headers = {\n        \"apikey\": os.getenv(\"SUPADB_API\"),\n        \"Authorization\": f\"Bearer {os.getenv('SUPADB_API')}\"\n    }\n
+]
+
+_tenant_mode_cache: dict = {}
+_MODE_TTL_SECONDS = 120
+
+
+def get_tenant_active_mode(tenant_id: str | None = None) -> str:
+    """Return the active mode slug for a tenant, defaulting to 'customer_support'."""
+    if not tenant_id:
+        return "customer_support"
+    now = time.monotonic()
+    cached = _tenant_mode_cache.get(tenant_id)
+    if cached and (now - cached[0]) < _MODE_TTL_SECONDS:
+        return cached[1] or "customer_support"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{tenant_id}&select=mode&limit=1",
+            headers=headers, timeout=10,
+        )
+        if resp.status_code == 200:
+            rows = resp.json() or []
+            if rows:
+                mode_data = rows[0].get("mode")
+                if isinstance(mode_data, dict):
+                    active = mode_data.get("active")
+                    if active:
+                        _tenant_mode_cache[tenant_id] = (now, active)
+                        return active
+    except Exception:
+        pass
+    _tenant_mode_cache[tenant_id] = (now, "customer_support")
+    return "customer_support"
+
+
+def fetch_agent_tasks_for_mode(tenant_id: str | None = None, mode: str | None = None) -> list[dict]:
+    """Fetch agent tasks for a specific mode."""
+    mode = mode or get_tenant_active_mode(tenant_id)
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    if not rest_url:
+        return []
+    query_url = (
+        f"{rest_url}?filename=eq.{urllib.parse.quote(mode, safe='')}"
+        f"&datatype=eq.agent_tasks"
+    )
+    if tenant_id:
+        query_url += f"&tenant_id=eq.{tenant_id}"
+    query_url += "&select=data&limit=1"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        response = requests.get(query_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return []
+        rows = response.json() or []
+        if not rows:
+            return []
+        raw = rows[0].get("data")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = {}
+        if isinstance(raw, dict):
+            tasks = raw.get("tasks", [])
+            if isinstance(tasks, list):
+                return [t for t in tasks if isinstance(t, dict)]
+    except Exception:
+        pass
+    return []
+
+
+# ==========================================
 # 2. Pre-Processing: PDF to Markdown Pipeline (Supabase -> LlamaParse -> MD)
 # ==========================================
 
@@ -1062,22 +1144,85 @@ _tenant_template_cache: dict = {}  # {tenant_id: (timestamp, template)}
 _TEMPLATE_TTL_SECONDS = 120
 
 
-def get_tenant_system_message_template(tenant_id: str | None = None):
-    if not tenant_id:
-        return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+def fetch_mode_custom_instruction(tenant_id: str | None = None, mode: str | None = None) -> str | None:
+    """Fetch the per-AI-mode Custom Instruction.
 
-    # TTL cache: tenant custom instructions rarely change; avoid a Supabase
-    # round-trip on every single chat message.
-    now = time.monotonic()
-    cached = _tenant_template_cache.get(tenant_id)
-    if cached and (now - cached[0]) < _TEMPLATE_TTL_SECONDS:
-        return cached[1]
+    Custom Instructions are split by AI mode (the same dimension the knowledge
+    base uses). They are stored in the `customer-service-provider` table as rows
+    with `datatype='custom_instructions'` and `filename=<mode>`.
+
+    Returns:
+      - None -> no mode / no row (caller should fall back to the profile column)
+      - ''   -> an explicit empty instruction for this mode
+      - str  -> the mode's instruction text
+    """
+    if not mode:
+        return None
+
+    rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+    if not rest_url:
+        return None
 
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
-    
+    query_url = (
+        f"{rest_url}?datatype=eq.custom_instructions"
+        f"&filename=eq.{urllib.parse.quote(mode, safe='')}"
+    )
+    if tenant_id:
+        query_url += f"&tenant_id=eq.{tenant_id}"
+    query_url += "&select=data&limit=1"
+
+    try:
+        response = requests.get(query_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            print(f"WARNING: Failed to load AI-mode instruction: {response.status_code} {response.text}")
+            return None
+        rows = response.json()
+        if not rows:
+            return None
+        raw = rows[0].get("data")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = {}
+        if isinstance(raw, dict):
+            return raw.get("instruction", "") or ""
+    except Exception as exc:
+        print(f"WARNING: Failed to load AI-mode custom instruction: {exc}")
+    return None
+
+
+def get_tenant_system_message_template(tenant_id: str | None = None, datatype: str | None = None):
+    if not tenant_id:
+        return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
+
+    # TTL cache keyed by (tenant, mode) so consecutive messages reuse the build.
+    now = time.monotonic()
+    cache_key = f"{tenant_id}::{datatype or '_default'}"
+    cached = _tenant_template_cache.get(cache_key)
+    if cached and (now - cached[0]) < _TEMPLATE_TTL_SECONDS:
+        return cached[1]
+
+    # 1) Prefer the per-AI-mode Custom Instruction (split by mode).
+    mode_instruction = fetch_mode_custom_instruction(tenant_id, datatype)
+    if mode_instruction is not None and str(mode_instruction).strip():
+        combined_template = f"""{DEFAULT_SYSTEM_MESSAGE_TEMPLATE}
+
+AI MODE CUSTOM INSTRUCTIONS:
+{str(mode_instruction).strip()}
+"""
+        _tenant_template_cache[cache_key] = (now, combined_template)
+        return combined_template
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+
     query_url = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{tenant_id}&select=custom_instruction&limit=1"
 
     try:
@@ -1092,26 +1237,27 @@ def get_tenant_system_message_template(tenant_id: str | None = None):
 
         custom_instruction = rows[0].get("custom_instruction")
 
-        # 👇 THE FIX: Merge the custom instruction with the default template
+        # Merge the custom instruction with the default template
         if isinstance(custom_instruction, str) and custom_instruction.strip():
             combined_template = f"""{DEFAULT_SYSTEM_MESSAGE_TEMPLATE}
 
 TENANT CUSTOM INSTRUCTIONS:
 {custom_instruction.strip()}
 """
-            _tenant_template_cache[tenant_id] = (now, combined_template)
+            _tenant_template_cache[cache_key] = (now, combined_template)
             return combined_template
-            
+
     except Exception as exc:
         print(f"WARNING: Failed to load tenant system message: {exc}")
 
+    _tenant_template_cache[cache_key] = (now, DEFAULT_SYSTEM_MESSAGE_TEMPLATE)
     return DEFAULT_SYSTEM_MESSAGE_TEMPLATE
 
 
-def get_dynamic_system_prompt(tenant_id: str | None = None, customer_id: str | None = None):
+def get_dynamic_system_prompt(tenant_id: str | None = None, customer_id: str | None = None, datatype: str | None = None):
     profile = load_user_profile(tenant_id, customer_id)
     profile_text = json.dumps(profile, indent=2) if profile else "No user data collected yet."
-    template = get_tenant_system_message_template(tenant_id)
+    template = get_tenant_system_message_template(tenant_id, datatype=datatype)
     return SystemMessage(content=template.replace("{profile_text}", profile_text))
 
 # FIX 5: Helper to strip XML tags from LLM output when XML parsing fails.
@@ -1159,8 +1305,12 @@ def _clean_final_output(raw_text: str) -> str:
 session_state = {
     "pending_tool_call": None,  # Stores the tool data when waiting for confirmation
 }
-def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
+def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None, mode=None, system_prompt=None):
     global session_state
+    
+    # When a node/flow specifies an AI mode (e.g. "statarb"), scope the tasks and
+    # custom instructions to it. Otherwise fall back to the tenant's active mode.
+    effective_mode = mode or get_tenant_active_mode(tenant_id)
     
     # Use per-tenant + per-customer session state
     tenant_key = f"{tenant_id or 'global'}_{customer_id or 'shared'}"
@@ -1186,7 +1336,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             print(f"\n[🔒 USER CONFIRMED: Executing {tool_name} with arguments {tool_args}...]")
             
             # Map and execute the function across per-tenant dynamic toolkits
-            toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
+            toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id, mode=effective_mode)
             all_available_tools = [tool for tools in toolkits_local.values() for tool in tools]
             tool_map = {tool.name: tool for tool in all_available_tools}
             
@@ -1206,7 +1356,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             
             # Let the AI know it was executed successfully
             final_prompt = f"The user confirmed the action. The system successfully executed the tool. Output: {tool_output}. Inform the user."
-            messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
+            messages = [get_dynamic_system_prompt(tenant_id, customer_id, datatype=effective_mode), HumanMessage(content=final_prompt)]
             response_obj = heavy_llm.invoke(messages)
             return {
                 "response": _clean_final_output(extract_text(response_obj.content)),
@@ -1248,7 +1398,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
         }
         
     # Build or fetch tenant-scoped toolkits and bound LLMs for this tenant
-    toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
+    toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id, mode=effective_mode)
     # Try to get the LLM bound to the specific datatype's tools first.
     # If no tools match that datatype, fall back to the combined '_all' tools.
     # If no tools exist at all, use the plain heavy_llm.
@@ -1419,7 +1569,16 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
     session_history = get_session_history(tenant_id, customer_id)
     # Trim history so the prompt doesn't grow unboundedly over a long chat.
     history_messages = session_history.messages[-8:]
-    messages = [get_dynamic_system_prompt(tenant_id, customer_id)] + history_messages + [
+    # Apply the AI Agent node's per-node system_prompt (if any) on top of the
+    # mode-scoped custom instructions + default template.
+    system_msg = get_dynamic_system_prompt(tenant_id, customer_id, datatype=effective_mode)
+    if system_prompt and str(system_prompt).strip():
+        system_msg = SystemMessage(
+            content=system_msg.content
+            + "\n\nADDITIONAL SYSTEM INSTRUCTIONS (from AI Agent node):\n"
+            + str(system_prompt).strip()
+        )
+    messages = [system_msg] + history_messages + [
         SystemMessage(content=final_system_prompt),
         HumanMessage(content=cot_user_prompt + turn_payload)
     ]
@@ -1488,7 +1647,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             print(f"\n[HITL SKIPPED] Tool '{tool_name}' passed all HITL checks. Executing directly.")
             
             # Build toolkits and execute
-            toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id)
+            toolkits_local, llm_with_tools_local = build_toolkits_for_tenant(tenant_id, mode=effective_mode)
             all_available_tools = [tool for tools in toolkits_local.values() for tool in tools]
             tool_map = {tool.name: tool for tool in all_available_tools}
             
@@ -1504,7 +1663,7 @@ def ask_agent(user_input, retrievers, tenant_id=None, customer_id=None):
             
             # Let the AI inform the user about the result
             final_prompt = f"The system successfully executed the tool '{tool_name}'. Output: {tool_output}. Inform the user about the result."
-            messages = [get_dynamic_system_prompt(tenant_id, customer_id), HumanMessage(content=final_prompt)]
+            messages = [get_dynamic_system_prompt(tenant_id, customer_id, datatype=effective_mode), HumanMessage(content=final_prompt)]
             response_obj = heavy_llm.invoke(messages)
             return {
                 "response": _clean_final_output(extract_text(response_obj.content)),
@@ -1592,21 +1751,26 @@ def evaluate_performance(question, context, answer):
 # ==========================================
 # 7.5 Dynamic Tool Generation
 # ==========================================
-def fetch_dynamic_tasks(tenant_id: str | None = None):
-    """Fetch dynamic task definitions from the CUSTOMER_SERVICE_PROVIDER endpoint.
+def fetch_dynamic_tasks(tenant_id: str | None = None, mode: str | None = None):
+    """Fetch dynamic task definitions for a given AI mode.
 
-    If tenant_id is provided, include it as a filter so each tenant can have
-    its own set of dynamic tasks.
+    Tasks are stored in the `customer-service-provider` table with
+    datatype='agent_tasks' and filename=<mode>, so each AI mode has its own
+    set of Agent Tasks (the same way each mode has its own knowledge base).
     """
-    print("DEBUG: Entering fetch_dynamic_tasks...")
     rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
     if not rest_url:
         print("ERROR: CUSTOMER_SERVICE_PROVIDER env var is missing!")
         return []
 
-    query_url = f"{rest_url}?filename=eq.tasks&datatype=eq.tasks&select=data"
+    mode = mode or get_tenant_active_mode(tenant_id)
+    query_url = (
+        f"{rest_url}?filename=eq.{urllib.parse.quote(mode, safe='')}"
+        f"&datatype=eq.agent_tasks"
+    )
     if tenant_id:
         query_url += f"&tenant_id=eq.{tenant_id}"
+    query_url += "&select=data&limit=1"
 
     headers = {
         "apikey": os.getenv("SUPADB_API"),
@@ -1614,24 +1778,31 @@ def fetch_dynamic_tasks(tenant_id: str | None = None):
     }
 
     try:
-        print(f"DEBUG: Requesting {query_url}")
         response = requests.get(query_url, headers=headers, timeout=10)
-        print(f"DEBUG: Response status: {response.status_code}")
-
-        if response.status_code == 200:
-            data = response.json()
-            print(f"DEBUG: Data received: {data}")
-            if data:
-                return data[0].get("data", [])
-            else:
-                print("DEBUG: Query returned empty list.")
-        else:
+        if response.status_code != 200:
             print(f"ERROR: Supabase returned {response.status_code}: {response.text}")
+            return []
+
+        rows = response.json() or []
+        if not rows:
+            return []
+
+        raw = rows[0].get("data")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = {}
+
+        if isinstance(raw, dict):
+            tasks = raw.get("tasks", [])
+            if isinstance(tasks, list):
+                return [t for t in tasks if isinstance(t, dict)]
+        return []
 
     except Exception as e:
         print(f"CRITICAL ERROR in fetch_dynamic_tasks: {str(e)}")
-
-    return []
+        return []
 
 
 def create_dynamic_tool(task_def):
@@ -1721,9 +1892,10 @@ def create_dynamic_tool(task_def):
 # ==========================================
 
 print("\n--- Initializing Knowledge Bases ---")
-def build_toolkits_for_tenant(tenant_id: str | None):
-    """Build dynamic toolkits and bound LLMs for every task datatype."""
-    raw_tasks_data = fetch_dynamic_tasks(tenant_id)
+def build_toolkits_for_tenant(tenant_id: str | None, mode: str | None = None):
+    """Build dynamic toolkits and bound LLMs for the tenant's active AI mode (or a specific mode)."""
+    active_mode = mode or get_tenant_active_mode(tenant_id)
+    raw_tasks_data = fetch_dynamic_tasks(tenant_id, mode=active_mode)
 
     if isinstance(raw_tasks_data, str):
         tasks_json = _parse_json_object(raw_tasks_data).get("tasks", [])
@@ -1774,7 +1946,7 @@ _retriever_cache: dict = {}  # {tenant_id: (timestamp, retrievers)}
 _RETRIEVER_TTL_SECONDS = 60
 
 
-def get_retrievers_for_tenant(tenant_id: str | None):
+def get_retrievers_for_tenant(tenant_id: str | None, mode: str | None = None):
     """Scans storage for each discovered datatype and runs preprocess() so any
     PDFs that haven't been parsed/embedded yet actually get sent through
     LlamaParse and inserted into the 'documents' vector table. preprocess()
@@ -1793,6 +1965,10 @@ def get_retrievers_for_tenant(tenant_id: str | None):
         return cached[1]
 
     discovered = discover_datatypes(tenant_id)
+    if mode:
+        # Scope to a single AI mode: only that mode's knowledge base is made
+        # available, so the AI can only talk about that mode.
+        discovered = [d for d in discovered if d == mode]
     retrievers = {}
 
     for dt in discovered:
@@ -1811,7 +1987,7 @@ def discover_datatypes(tenant_id: str | None):
 
     rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
     if rest_url:
-        query_url = f"{rest_url}?select=datatype&datatype=neq.tasks"
+        query_url = f"{rest_url}?select=datatype&datatype=neq.tasks&datatype=neq.custom_instruction&datatype=neq.custom_instructions&datatype=neq.agent_tasks"
         if tenant_id:
             query_url += f"&tenant_id=eq.{tenant_id}"
 

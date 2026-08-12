@@ -5,6 +5,7 @@ export type {
   WidgetType,
   DataSourceRef,
   WidgetConfig,
+  WidgetConfigField,
   DashboardWidget,
   DashboardLayout,
   WidgetDefinition,

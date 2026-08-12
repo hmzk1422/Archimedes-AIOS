@@ -81,16 +81,37 @@
   --sidebar-primary-foreground: oklch(0.2 0.03 70);
   --sidebar-accent: oklch(0.26 0.012 260);
   --sidebar-accent-foreground: oklch(0.96 0.006 90);
-  --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(95% 0.04 80);
+  /* Appearance custom properties (driven live by <AppearanceProvider/>).
+     Defaults below reproduce the pre-installed theme so the look is unchanged
+     until an admin customises something. */
+  --app-font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --app-heading-family: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --app-font-size: 1rem;
+  --app-letter-spacing: 0em;
+  --app-line-height: 1.5;
+  --app-density: default;
+  --app-max-width: 88rem;
+  --app-shadow: none;
+  --app-animation: inherit;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    font-size: var(--app-font-size, 1rem);
+  }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--app-font-family);
+    letter-spacing: var(--app-letter-spacing, 0em);
+    line-height: var(--app-line-height, 1.5);
+  }
+  [data-slot="card"] {
+    box-shadow: var(--app-shadow);
   }
 }
 

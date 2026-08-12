@@ -147,6 +147,7 @@ export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boo
   const [loading, setLoading] = useState(false)
   const [checking, setChecking] = useState(true)
   const [status, setStatus] = useState<Status>({ kind: 'idle', message: '' })
+  const [tenantId, setTenantId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -159,6 +160,8 @@ export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boo
         if (!cancelled) setChecking(false)
         return
       }
+
+      if (!cancelled) setTenantId(user.id)
 
       const { data, error } = await supabase
         .from('profiles')
@@ -289,6 +292,7 @@ export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boo
             loading={loading}
             status={status.kind !== 'idle' ? status : null}
             fullScreen
+            tenantId={tenantId ?? undefined}
           />
         </div>
       </div>
@@ -320,6 +324,7 @@ export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boo
             onSave={handleSave}
             loading={loading}
             status={status.kind !== 'idle' ? status : null}
+            tenantId={tenantId ?? undefined}
           />
         </CardContent>
       </Card>

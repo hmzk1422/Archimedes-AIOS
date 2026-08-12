@@ -22,7 +22,10 @@ app.add_middleware(
 # ==========================================
 # 1. Core Infrastructure Config
 # ==========================================
-AI_ENDPOINT_URL = os.getenv("AI_ENDPOINT_URL", "http://localhost:8000/chat")
+# Where the AI engine lives. Defaults to the canvas-aware /workflow/execute
+# endpoint so a drawn-and-saved flow (AI Agent node with its mode/prompt + output
+# nodes) is actually executed at runtime rather than a bare /chat call.
+AI_ENDPOINT_URL = os.getenv("AI_ENDPOINT_URL", "http://localhost:8000/workflow/execute")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPADB_API")
 
@@ -43,6 +46,7 @@ class ActivepiecesInboundPayload(BaseModel):
     token: str
     message: Any = Field(default_factory=dict)
     customer_id: Optional[str] = ""
+    mode: Optional[str] = None
 
     class Config:
         extra = "allow"
@@ -343,6 +347,7 @@ async def process_activepieces_message(payload: ActivepiecesInboundPayload):
         "message": msg_text,
         "tenant_id": tenant_match.tenant_id,
         "customer_id": cust_id,
+        "mode": payload.mode,
     }
 
     async with httpx.AsyncClient() as client:
@@ -365,6 +370,37 @@ async def process_activepieces_message(payload: ActivepiecesInboundPayload):
         customer_id=cust_id,
         outbound=tenant_match.platform_config,
     )
+
+
+# ==========================================
+# 5b. Canvas Flow Execution Endpoint
+# ==========================================
+# Lets the in-house canvas actually RUN a saved flow. It forwards to the AI
+# engine's /workflow/execute, which loads the tenant's saved canvas flow
+# (profiles.extension -> connection-extension.flow), runs the AI Agent node
+# (scoped to its mode + system_prompt) and executes connected output nodes.
+@app.post("/workflow/execute")
+async def workflow_execute_endpoint(payload: dict):
+    async with httpx.AsyncClient() as client:
+        try:
+            ai_response = await client.post(AI_ENDPOINT_URL, json=payload, timeout=120.0)
+            ai_response.raise_for_status()
+            data = ai_response.json()
+            # Normalize to the DispatcherResponse shape the UI / connectors expect.
+            return {
+                "status": data.get("status", "success"),
+                "reply_text": data.get("response", ""),
+                "tenant_id": payload.get("tenant_id", ""),
+                "token": payload.get("token", ""),
+                "platform": payload.get("platform", "canvas"),
+                "customer_id": payload.get("customer_id", ""),
+                "outbound": data.get("actions", []),
+                "hitl_pending": data.get("hitl_pending", False),
+                "flow_node": data.get("flow_node"),
+            }
+        except Exception as exc:
+            print(f"[ERROR] /workflow/execute forwarding failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"AI Engine Error: {exc}")
 
 
 # ==========================================
@@ -405,6 +441,7 @@ async def process_n8n_message(request: dict):
             "message": msg_text,
             "tenant_id": tenant_match.tenant_id,
             "customer_id": cust_id,
+            "mode": request.get("mode"),
         }
 
         async with httpx.AsyncClient() as client:

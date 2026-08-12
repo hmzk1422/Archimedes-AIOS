@@ -5,6 +5,7 @@ import { createClient as createServerClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import { getAuthUser, hasPermission, normalizeRole, type Role } from '@/lib/rbac-server'
 import { generateInviteCode } from '@/lib/rbac'
+import type { Appearance } from '@/lib/theme'
 
 /**
  * Service-role client. Bypasses RLS so the app can read/link workspace members
@@ -278,4 +279,53 @@ export async function deleteAccountAction() {
 
   // Redirect to auth page
   redirect('/auth')
+}
+
+/**
+ * Read the workspace appearance (theme + canvas settings).
+ *
+ * Appearance lives on the workspace OWNER's profile row (workspace_id === the
+ * admin's id), so every member of a workspace reads the same shared theme.
+ * Returns `canEdit` so the UI knows whether the signed-in user may customise.
+ */
+export async function getTenantAppearanceAction(): Promise<{
+  appearance: Appearance | null
+  canEdit: boolean
+}> {
+  const authUser = await getAuthUser()
+  if (!authUser) return { appearance: null, canEdit: false }
+
+  const canEdit = authUser.role === 'admin' || authUser.accountType === 'admin'
+
+  const supabase = createAdminClient()
+  const { data } = await supabase
+    .from('profiles')
+    .select('appearance')
+    .eq('id', authUser.workspaceId)
+    .maybeSingle()
+
+  return { appearance: (data?.appearance as Appearance | null) ?? null, canEdit }
+}
+
+/**
+ * Persist the workspace appearance. Only admins (the workspace owner) may
+ * change it — the security boundary is enforced server-side with the service
+ * role, not just hidden in the UI.
+ */
+export async function updateTenantAppearanceAction(appearance: Appearance) {
+  const authUser = await getAuthUser()
+  if (!authUser) throw new Error('Not authenticated')
+
+  if (authUser.role !== 'admin' && authUser.accountType !== 'admin') {
+    throw new Error('Only the workspace admin can change the appearance.')
+  }
+
+  const supabase = createAdminClient()
+  const { error } = await supabase
+    .from('profiles')
+    .update({ appearance })
+    .eq('id', authUser.id)
+
+  if (error) throw new Error(error.message)
+  return appearance
 }

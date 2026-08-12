@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from 'next'
 import { Inter, Space_Grotesk } from 'next/font/google'
 import './globals.css'
 import { cn } from "@/lib/utils";
+import { AppearanceProvider } from '@/components/appearance/appearance-provider'
 
 const inter = Inter({
   subsets: ['latin'],
@@ -38,7 +39,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={cn("bg-background", inter.variable, spaceGrotesk.variable, "font-sans")}>
       <body className="font-sans antialiased">
-        {children}
+        <AppearanceProvider>
+          {children}
+        </AppearanceProvider>
         {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>
