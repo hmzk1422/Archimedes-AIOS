@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
+import { AppearanceSettings } from '@/components/settings/appearance-settings'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -246,6 +247,21 @@ export default function SettingsPage() {
         )}
 
         <div className="space-y-6">
+          {/* ── Appearance (Admin only) ── */}
+          {accountType === 'admin' && (
+            <section className="space-y-3">
+              <div>
+                <h2 className="font-display text-xl font-bold tracking-tight">
+                  Appearance
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Customise the logo, color scheme and dashboard for your entire
+                  workspace. The default theme is always one click away.
+                </p>
+              </div>
+              <AppearanceSettings />
+            </section>
+          )}
           {/* ── Workspace & Invite Code Card (Admin only) ── */}
           {accountType === 'admin' && (
             <Card className="border-primary/20">

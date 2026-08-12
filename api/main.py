@@ -1,11 +1,13 @@
 import os
 import json
 import requests
+import urllib.parse
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file, delete_all_tenant_data
+from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file, delete_all_tenant_data, fetch_mode_custom_instruction, get_tenant_active_mode
+from workflow_engine import run_flow
 from telemetry_sdk import get_telemetry, reset_telemetry
 from supabase import create_client, Client
 from hitl import fetch_hitl_config, evaluate_hitl, HITLDecision, detect_sentiment, fetch_task_names
@@ -72,13 +74,16 @@ async def chat_endpoint(data: dict):
         user_input = data.get("message")
         tenant_id = data.get("tenant_id")
         customer_id = data.get("customer_id")
+        mode = data.get("mode") or data.get("datatype")
 
         if not user_input:
             return {"status": "error", "message": "No message provided"}
 
-        # Instantly builds retrievers without running heavy pipeline tasks
-        retrievers = get_retrievers_for_tenant(tenant_id)
-        result = ask_agent(user_input, retrievers, tenant_id, customer_id)
+        # Instantly builds retrievers without running heavy pipeline tasks.
+        # When a node/flow passes a mode (e.g. "statarb"), scope the knowledge
+        # base, custom instructions and tasks to that mode only.
+        retrievers = get_retrievers_for_tenant(tenant_id, mode=mode)
+        result = ask_agent(user_input, retrievers, tenant_id, customer_id, mode=mode)
 
         # result is now a dict with structured fields
         return {
@@ -134,12 +139,13 @@ async def chat_stream_endpoint(data: dict):
         user_input = data.get("message")
         tenant_id = data.get("tenant_id")
         customer_id = data.get("customer_id")
+        mode = data.get("mode") or data.get("datatype")
 
         if not user_input:
             return {"status": "error", "message": "No message provided"}
 
-        retrievers = get_retrievers_for_tenant(tenant_id)
-        result = ask_agent(user_input, retrievers, tenant_id, customer_id)
+        retrievers = get_retrievers_for_tenant(tenant_id, mode=mode)
+        result = ask_agent(user_input, retrievers, tenant_id, customer_id, mode=mode)
 
         response_text = result.get("response", "")
         hitl_pending = result.get("hitl_pending", False)
@@ -188,6 +194,136 @@ async def delete_knowledge_endpoint(request: DeleteKnowledgeRequest):
         return {"status": "ok", **result}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+
+
+class CustomInstructionRequest(BaseModel):
+    tenant_id: str
+    mode: str | None = None
+    instruction: str = ""
+
+
+class WorkflowRunRequest(BaseModel):
+    tenant_id: str
+    message: str
+    customer_id: str | None = None
+    mode: str | None = None
+    # When present, this is the live canvas config (drawn flow), used directly
+    # instead of reloading the tenant's saved flow — enables Run-as-drawn.
+    flow: Optional[dict] = None
+
+
+@app.get("/knowledge/custom-instruction")
+async def get_custom_instruction(tenant_id: str, mode: str | None = None):
+    """Return the per-AI-mode custom instruction, falling back to the legacy profile column."""
+    try:
+        effective_mode = mode or get_tenant_active_mode(tenant_id)
+        instruction = fetch_mode_custom_instruction(tenant_id, effective_mode)
+        if instruction is not None and instruction.strip():
+            return {"status": "ok", "mode": effective_mode, "instruction": instruction}
+
+        # Fallback to the legacy profiles.custom_instruction column
+        headers = {
+            "apikey": os.getenv("SUPADB_API"),
+            "Authorization": f"Bearer {os.getenv('SUPADB_API')}",
+        }
+        profile_instr = ""
+        resp = requests.get(
+            f"{os.getenv('SUPABASE_URL')}/rest/v1/profiles?id=eq.{tenant_id}&select=custom_instruction&limit=1",
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200 and (resp.json() or []):
+            profile_instr = resp.json()[0].get("custom_instruction") or ""
+        return {"status": "ok", "mode": effective_mode, "instruction": profile_instr or ""}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/knowledge/custom-instruction")
+async def save_custom_instruction(request: CustomInstructionRequest):
+    """Save (upsert) the per-AI-mode custom instruction into customer-service-provider.
+
+    Row: datatype='custom_instructions', filename=<mode>, tenant_id, data={"instruction": ...}
+    Mirrors the dashboard_config insert-then-patch upsert pattern.
+    """
+    try:
+        SUPABASE_KEY = os.getenv("SUPADB_API")
+        rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+        if not rest_url or not SUPABASE_KEY:
+            return {"status": "error", "message": "Database not configured"}
+
+        mode = request.mode or get_tenant_active_mode(request.tenant_id)
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        payload = {
+            "datatype": "custom_instructions",
+            "filename": mode,
+            "tenant_id": request.tenant_id,
+            "data": {"instruction": request.instruction},
+        }
+
+        response = requests.post(rest_url, json=payload, headers=headers, timeout=10)
+        if response.status_code in (200, 201):
+            return {"status": "ok", "message": "Custom instruction saved", "mode": mode}
+
+        if response.status_code == 409 or "23505" in response.text or "duplicate" in response.text.lower():
+            encoded = urllib.parse.quote(mode, safe="")
+            patch_response = requests.patch(
+                f"{rest_url}?datatype=eq.custom_instructions&filename=eq.{encoded}&tenant_id=eq.{request.tenant_id}",
+                json={"data": payload["data"]},
+                headers=headers,
+                timeout=10,
+            )
+            if patch_response.status_code in (200, 204):
+                return {"status": "ok", "message": "Custom instruction updated", "mode": mode}
+            return {"status": "error", "message": f"Update failed: {patch_response.text}"}
+
+        return {"status": "error", "message": f"Save failed: {response.text}"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/workflow/execute")
+async def workflow_execute_endpoint(request: WorkflowRunRequest):
+    """Execute the tenant's saved canvas flow (drag-and-drop) for one message.
+
+    Loads the flow the canvas saved under profiles.extension, runs the AI Agent
+    node (scoped to its mode + system_prompt) and executes output nodes. Falls
+    back to a normal ask_agent call when the flow has no AI Agent node.
+    """
+    try:
+        import asyncio
+
+        result = await asyncio.to_thread(
+            run_flow,
+            request.tenant_id,
+            request.message,
+            request.customer_id,
+            mode_hint=request.mode,
+            flow=request.flow,
+        )
+        return {
+            "status": "ok",
+            "response": result.get("response", ""),
+            "hitl_pending": result.get("hitl_pending", False),
+            "hitl_action": result.get("hitl_action"),
+            "hitl_reason": result.get("hitl_reason"),
+            "tool_executed": result.get("tool_executed"),
+            "tool_output": result.get("tool_output"),
+            "flow_node": result.get("flow_node"),
+            "actions": result.get("actions", []),
+        }
+    except Exception as exc:
+        import traceback
+
+        print(f"BACKEND CRASH IN /workflow/execute: {str(exc)}")
+        traceback.print_exc()
+        return {"status": "error", "message": str(exc)}
+
 
 
 class AccountDeleteRequest(BaseModel):

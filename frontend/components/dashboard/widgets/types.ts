@@ -36,10 +36,29 @@ export interface DataSourceRef {
 export interface WidgetConfig {
   /** Human-readable title shown in the widget header */
   title?: string
+  /** Optional one-line description rendered under the title */
+  description?: string
   /** Time range key: '7d' | '14d' | '30d' | '90d' */
   range?: string
+  /** Optional accent color (CSS value) drawn as a widget highlight bar */
+  accent?: string
+  /** When true the AI is allowed to auto-tune this widget's range/layout */
+  aiManaged?: boolean
   /** Extra options specific to the widget type */
   [key: string]: unknown
+}
+
+/** Describes an editable field for the generic widget config panel. */
+export interface WidgetConfigField {
+  /** Config key this field edits (e.g. 'metricField') */
+  key: string
+  label: string
+  type: 'text' | 'color' | 'range' | 'toggle' | 'select'
+  /** For select fields, the allowed values */
+  options?: { value: string; label: string }[]
+  placeholder?: string
+  min?: number
+  max?: number
 }
 
 /** A single widget on the dashboard canvas. */
@@ -82,4 +101,6 @@ export interface WidgetDefinition {
   defaultRange: string
   /** Whether this widget is a chart vs. a metric card vs. a table */
   viewType: 'chart' | 'metric' | 'table'
+  /** Extra configurable fields shown in the generic widget config panel */
+  configSchema?: WidgetConfigField[]
 }

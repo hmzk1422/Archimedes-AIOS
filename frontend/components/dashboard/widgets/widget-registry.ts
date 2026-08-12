@@ -107,6 +107,19 @@ export const WIDGET_DEFINITIONS: Record<string, WidgetDefinition> = {
     description: 'Track any custom metric like deflection rate, tickets resolved, CSAT, etc.',
     icon: TrendingUp, defaultWidth: 2, defaultHeight: 2,
     defaultDataSource: { nodeType: 'telemetry_metrics' }, defaultRange: '30d', viewType: 'metric',
+    configSchema: [
+      { key: 'metricName', label: 'Metric Name', type: 'text', placeholder: 'e.g. Deflection Rate' },
+      { key: 'metricField', label: 'Data Field', type: 'text', placeholder: 'e.g. resolved_count, cost, latency' },
+      {
+        key: 'aggregation', label: 'Aggregation', type: 'select',
+        options: [
+          { value: 'avg', label: 'Average' },
+          { value: 'sum', label: 'Sum' },
+          { value: 'max', label: 'Maximum' },
+          { value: 'count', label: 'Count' },
+        ],
+      },
+    ],
   },
 }
 

@@ -4,7 +4,6 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
-  Waypoints,
   LayoutDashboard,
   Database,
   Wrench,
@@ -20,6 +19,7 @@ import { RoleBadge } from '@/components/rbac/RoleBadge'
 import { hasPermission, type Permission } from '@/lib/rbac'
 import { NotificationsMenu } from '@/components/dashboard/notifications-menu'
 import { AccountMenu } from '@/components/dashboard/account-menu'
+import { useAppearance } from '@/components/appearance/appearance-provider'
 
 // Icon map — maps string names to components
 const ICON_MAP: Record<string, typeof LayoutDashboard> = {
@@ -49,6 +49,8 @@ export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string
   const [open, setOpen] = useState(false)
   const pathname = usePathname()
   const { role, loading } = useRole()
+  const { appearance } = useAppearance()
+  const theme = appearance.theme
 
   // Filter nav links based on role
   const navLinks = ALL_NAV_LINKS.filter((link) =>
@@ -60,10 +62,21 @@ export function DashboardNav({ tenantName = 'Acme Inc.' }: { tenantName?: string
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
         <div className="flex items-center gap-8">
           <Link href="/dashboard" className="flex items-center gap-2">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <Waypoints className="size-5" />
+            {theme.logoSrc ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={theme.logoSrc}
+                alt={theme.brandName}
+                className="size-8 rounded-lg object-contain"
+              />
+            ) : (
+              <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-display font-bold">
+                {theme.mark || theme.brandName.charAt(0)}
+              </span>
+            )}
+            <span className="font-display text-lg font-bold tracking-tight">
+              {theme.brandName}
             </span>
-            <span className="font-display text-lg font-bold tracking-tight">Relay</span>
           </Link>
 
           <nav className="hidden items-center gap-1 md:flex">

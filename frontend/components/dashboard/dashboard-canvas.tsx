@@ -14,11 +14,12 @@ import {
 import { restrictToParentElement } from '@dnd-kit/modifiers'
 import { CSS } from '@dnd-kit/utilities'
 import { useDashboard } from '@/hooks/useDashboard'
+import { useAppearance } from '@/components/appearance/appearance-provider'
 import { WIDGET_REGISTRY } from '@/components/dashboard/widgets/widget-registry'
-import { DragHandleContext } from '@/components/dashboard/widgets/drag-context'
+import { DragHandleContext, WidgetConfigContext } from '@/components/dashboard/widgets/drag-context'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { Plus, RefreshCw, Save, X } from 'lucide-react'
+import { Plus, RefreshCw, Save, X, Sparkles, Wand2 } from 'lucide-react'
 import type { DashboardWidget } from '@/components/dashboard/widgets/types'
 
 /** Number of columns in the dashboard grid. */
@@ -73,20 +74,65 @@ function resolveCollisions(
   return next
 }
 
+  /**
+   * AI-assisted auto-arrangement: sorts widgets by usefulness (metric cards on
+   * top, then charts, then tables) and packs them into a clean grid. Purely
+   * client-side and deterministic, so it never loses data.
+   */
+  function autoArrangeWidgets(
+    widgetList: DashboardWidget[],
+    columns: number,
+  ): DashboardWidget[] {
+    const priority: Record<string, number> = { metric: 0, chart: 1, table: 2 }
+    const sorted = [...widgetList].sort((a, b) => {
+      const da = WIDGET_REGISTRY[a.type]?.definition
+      const db = WIDGET_REGISTRY[b.type]?.definition
+      return (
+        (priority[da?.viewType || 'chart'] ?? 1) -
+        (priority[db?.viewType || 'chart'] ?? 1)
+      )
+    })
+    let x = 0
+    let y = 0
+    let rowH = 0
+    return sorted.map((w) => {
+      const ww = clamp(w.w || 2, 2, columns)
+      const hh = clamp(w.h || 2, 2, 40)
+      if (x + ww > columns) {
+        x = 0
+        y += rowH
+        rowH = 0
+      }
+      const item = { ...w, x, y, w: ww, h: hh }
+      x += ww
+      rowH = Math.max(rowH, hh)
+      return item
+    })
+  }
+
+
   function DraggableWidget({
-  widget,
-  data,
-  onRemove,
-  onResize,
-}: {
-  widget: DashboardWidget
-  data: unknown
-  onRemove: (id: string) => void
-  onResize?: (id: string, w: number, h: number) => void
-}) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: widget.id,
-  })
+    widget,
+    data,
+    onRemove,
+    onResize,
+    onConfigChange,
+    columns,
+    rowHeight,
+  }: {
+    widget: DashboardWidget
+    data: unknown
+    onRemove: (id: string) => void
+    onResize?: (id: string, w: number, h: number) => void
+    onConfigChange: (widget: DashboardWidget) => void
+    columns: number
+    rowHeight: number
+  }) {
+    const cols = columns || GRID_COLS
+    const rh = rowHeight || ROW_HEIGHT
+    const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+      id: widget.id,
+    })
   const entry = WIDGET_REGISTRY[widget.type]
   const WidgetComponent = entry?.component
 
@@ -104,7 +150,7 @@ function resolveCollisions(
     homeY: number
   } | null>(null)
 
-  const w = clamp(resizeOverride?.w ?? (widget.w || 2), 1, GRID_COLS)
+  const w = clamp(resizeOverride?.w ?? (widget.w || 2), 1, cols)
   const h = resizeOverride?.h ?? (widget.h || 2)
 
   const startResize = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -120,7 +166,7 @@ function resolveCollisions(
       w: curW,
       h: widget.h || 2,
       cellW: Math.max(1, rect.width / curW),
-      cellH: ROW_HEIGHT,
+      cellH: rh,
       homeX: widget.x,
       homeY: widget.y,
     }
@@ -130,7 +176,7 @@ function resolveCollisions(
       if (!r) return
       const dx = ev.clientX - r.startX
       const dy = ev.clientY - r.startY
-      const nw = clamp(r.w + Math.round(dx / r.cellW), 2, GRID_COLS - r.homeX)
+      const nw = clamp(r.w + Math.round(dx / r.cellW), 2, cols - r.homeX)
       const nh = clamp(r.h + Math.round(dy / r.cellH), 2, 40 - r.homeY)
       setResizeOverride({ w: nw, h: nh })
     }
@@ -142,7 +188,7 @@ function resolveCollisions(
       if (!r) return
       const dx = ev.clientX - r.startX
       const dy = ev.clientY - r.startY
-      const nw = clamp(r.w + Math.round(dx / r.cellW), 2, GRID_COLS - r.homeX)
+      const nw = clamp(r.w + Math.round(dx / r.cellW), 2, cols - r.homeX)
       const nh = clamp(r.h + Math.round(dy / r.cellH), 2, 40 - r.homeY)
       setResizeOverride(null)
       onResize?.(widget.id, nw, nh)
@@ -160,10 +206,10 @@ function resolveCollisions(
         }}
         className="absolute"
         style={{
-          left: `${(widget.x / GRID_COLS) * 100}%`,
-          top: `${(widget.y || 0) * ROW_HEIGHT}px`,
-          width: `${(w / GRID_COLS) * 100}%`,
-          height: `${h * ROW_HEIGHT}px`,
+          left: `${(widget.x / cols) * 100}%`,
+          top: `${(widget.y || 0) * rh}px`,
+          width: `${(w / cols) * 100}%`,
+          height: `${h * rh}px`,
           transform: CSS.Translate.toString(transform),
           zIndex: isDragging ? 40 : 10,
           opacity: isDragging ? 0.95 : 1,
@@ -184,11 +230,17 @@ function resolveCollisions(
               <X className="size-3.5" />
             </button>
             <div className="h-full overflow-hidden rounded-xl">
-              {WidgetComponent ? <WidgetComponent widget={widget} data={data} /> : null}
+              <WidgetConfigContext.Provider value={{ onConfigChange }}>
+                {WidgetComponent ? <WidgetComponent widget={widget} data={data} /> : null}
+              </WidgetConfigContext.Provider>
             </div>
             {/* Resize handle (bottom-right corner) */}
-            <div
-              onPointerDown={startResize}
+                        <div
+              onPointerDown={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                startResize(e)
+              }}
               title="Drag to resize"
               className="absolute bottom-1 right-1 z-30 flex size-4 cursor-se-resize items-center justify-center rounded-sm text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
             >
@@ -216,7 +268,13 @@ export function DashboardCanvas() {
     refreshData,
     widgetData,
     applyLayout,
+    updateWidget,
   } = useDashboard()
+
+  const { appearance, update: updateAppearance } = useAppearance()
+  const columns = appearance.canvas.columns || GRID_COLS
+  const rowHeight = appearance.canvas.rowHeight || ROW_HEIGHT
+  const aiManaged = appearance.canvas.aiManaged
 
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -238,15 +296,15 @@ export function DashboardCanvas() {
       if (!widget || !containerRef.current) return
 
       const containerWidth = containerRef.current.clientWidth
-      const cellWidth = Math.max(1, containerWidth / GRID_COLS)
-      const newX = clamp(widget.x + Math.round(event.delta.x / cellWidth), 0, GRID_COLS - (widget.w || 2))
-      const newY = clamp(widget.y + Math.round(event.delta.y / ROW_HEIGHT), 0, 40)
+      const cellWidth = Math.max(1, containerWidth / columns)
+      const newX = clamp(widget.x + Math.round(event.delta.x / cellWidth), 0, columns - (widget.w || 2))
+      const newY = clamp(widget.y + Math.round(event.delta.y / rowHeight), 0, 40)
 
       if (newX === widget.x && newY === widget.y) return
       const resolved = resolveCollisions(widgets, id, newX, newY)
       applyLayout(resolved)
     },
-    [widgets, applyLayout]
+    [widgets, applyLayout, columns, rowHeight]
   )
 
   const handleDragCancel = useCallback(() => setActiveId(null), [])
@@ -257,14 +315,27 @@ export function DashboardCanvas() {
       if (!widget || (nw === widget.w && nh === widget.h)) return
       const updated = widgets.map((w) =>
         w.id === id
-          ? { ...w, w: clamp(nw, 2, GRID_COLS - w.x), h: clamp(nh, 2, 40 - w.y) }
+          ? { ...w, w: clamp(nw, 2, columns - w.x), h: clamp(nh, 2, 40 - w.y) }
           : w
       )
       const resolved = resolveCollisions(updated, id, widget.x, widget.y)
       applyLayout(resolved)
     },
-    [widgets, applyLayout]
+    [widgets, applyLayout, columns]
   )
+
+  /** Update a single widget's persisted config/layout through the dashboard hook. */
+  const handleWidgetConfig = useCallback(
+    (next: DashboardWidget) => {
+      updateWidget(next.id, next)
+    },
+    [updateWidget],
+  )
+
+  const handleAutoLayout = useCallback(() => {
+    applyLayout(autoArrangeWidgets(widgets, columns))
+  }, [widgets, applyLayout, columns])
+
 
   if (error) {
     return (
@@ -285,7 +356,14 @@ export function DashboardCanvas() {
   }
 
   const maxRows = Math.max(6, ...widgets.map((w) => (w.y || 0) + (w.h || 2)))
-  const canvasHeight = maxRows * ROW_HEIGHT + ROW_HEIGHT
+  const canvasHeight = maxRows * rowHeight + rowHeight
+
+  const toggleAiManaged = async () => {
+    await updateAppearance({
+      ...appearance,
+      canvas: { ...appearance.canvas, aiManaged: !aiManaged },
+    })
+  }
 
   return (
     <div className="space-y-4">
@@ -310,8 +388,41 @@ export function DashboardCanvas() {
             )}
             Refresh
           </Button>
+          {widgets.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleAutoLayout}
+              className="gap-1.5"
+              title="Auto-arrange metric cards, charts and tables into a clean grid"
+            >
+              <Wand2 className="size-4" />
+              AI auto-layout
+            </Button>
+          )}
         </div>
         <div className="flex items-center gap-2">
+          {aiManaged ? (
+            <button
+              type="button"
+              onClick={toggleAiManaged}
+              className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-primary/20"
+              title="AI-managed dashboard: click to disable and take manual control"
+            >
+              <Sparkles className="size-3" />
+              AI-managed
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={toggleAiManaged}
+              className="flex items-center gap-1 rounded-full border border-border bg-secondary/40 px-2 py-0.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-secondary"
+              title="Enable AI-managed dashboard"
+            >
+              <Sparkles className="size-3" />
+              AI-managed
+            </button>
+          )}
           {saving && <span className="text-xs text-muted-foreground">Saving…</span>}
           <Button size="sm" onClick={saveNow} disabled={saving} className="gap-1.5">
             <Save className="size-3.5" />
@@ -377,7 +488,7 @@ export function DashboardCanvas() {
               style={{
                 backgroundImage:
                   'linear-gradient(to right, hsl(var(--border) / 0.18) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border) / 0.18) 1px, transparent 1px)',
-                backgroundSize: `calc(100% / ${GRID_COLS}) ${ROW_HEIGHT}px`,
+                backgroundSize: `calc(100% / ${columns}) ${rowHeight}px`,
               }}
             />
             <div className="absolute inset-0">
@@ -388,6 +499,9 @@ export function DashboardCanvas() {
                   data={widgetData || {}}
                   onRemove={removeWidget}
                   onResize={handleResizeEnd}
+                  onConfigChange={handleWidgetConfig}
+                  columns={columns}
+                  rowHeight={rowHeight}
                 />
               ))}
             </div>

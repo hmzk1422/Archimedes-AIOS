@@ -17,7 +17,7 @@ import {
   type OnEdgesChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Save, Loader2, Trash2, AlertCircle, GripVertical, Search, X, Copy, ClipboardPaste } from 'lucide-react'
+import { Save, Loader2, Trash2, AlertCircle, GripVertical, Search, X, Copy, ClipboardPaste, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import WorkflowNode from './WorkflowNode'
@@ -36,6 +36,18 @@ interface WorkflowEditorProps {
   status?: { kind: 'idle' | 'success' | 'error' | 'info'; message: string } | null
   /** When true the editor fills its parent's height instead of a fixed 600px tall box. */
   fullScreen?: boolean
+  /** Supabase user id — the tenant whose saved flow will be executed on Run. */
+  tenantId?: string
+  /** Base URL of the gateway (extension.py). Defaults to NEXT_PUBLIC_API_URL. */
+  apiBaseUrl?: string
+}
+
+/** Result returned by a Run — used only for inline display. */
+interface RunResult {
+  status: string
+  response: string
+  flow_node?: string
+  actions?: unknown[]
 }
 
 function generateId(): string {
@@ -107,7 +119,7 @@ const isValidConnection = (connection: Connection): boolean => {
   return isSourceOutput && isTargetInput
 }
 
-export default function WorkflowEditor({ initialConfig, onSave, loading, status, fullScreen = false }: WorkflowEditorProps) {
+export default function WorkflowEditor({ initialConfig, onSave, loading, status, fullScreen = false, tenantId, apiBaseUrl }: WorkflowEditorProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null)
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null)
   const [masterEnabled, setMasterEnabled] = useState(initialConfig?.masterEnabled ?? true)
@@ -115,6 +127,8 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status,
   const [edges, setEdges] = useState<Edge[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set())
+  const [running, setRunning] = useState(false)
+  const [runResult, setRunResult] = useState<RunResult | null>(null)
   
   // Load Activepieces nodes dynamically
   const { nodeDefinitions: dynamicNodeDefinitions, loading: piecesLoading } = useActivepiecesNodes()
@@ -446,13 +460,16 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status,
     [pasteFromData]
   )
 
-  const handleSave = useCallback(async () => {
+    // ──────────────────────────────────────────────
+  // Build a serializable FlowConfig from the current canvas state.
+  // Shared by Save and Run so the executed flow matches what's drawn.
+  // ──────────────────────────────────────────────
+  const buildFlowConfig = useCallback((): FlowConfig => {
     const flowConfig: FlowConfig = {
       masterEnabled,
       nodes: {},
       edges: [],
     }
-
     nodes.forEach((n: Node) => {
       const d = n.data as Record<string, unknown>
       flowConfig.nodes[n.id] = {
@@ -474,8 +491,58 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status,
       })
     })
 
-    await onSave(flowConfig)
-  }, [nodes, edges, masterEnabled, onSave])
+    return flowConfig
+  }, [nodes, edges, masterEnabled])
+
+  const handleSave = useCallback(async () => {
+    await onSave(buildFlowConfig())
+  }, [buildFlowConfig, onSave])
+
+  const handleRun = useCallback(async () => {
+    const flowConfig = buildFlowConfig()
+    const apiBase = (apiBaseUrl || process.env.NEXT_PUBLIC_API_URL || '').replace(/\/+$/, '')
+    if (!apiBase) {
+      setRunResult({ status: 'error', response: 'No API base URL configured (NEXT_PUBLIC_API_URL).' })
+      return
+    }
+    if (!tenantId) {
+      setRunResult({ status: 'error', response: 'No tenant id — log in first.' })
+      return
+    }
+
+    setRunning(true)
+    setRunResult(null)
+    try {
+      const res = await fetch(`${apiBase}/workflow/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenant_id: tenantId,
+          customer_id: `test-customer-${tenantId}`,
+          flow: flowConfig,
+          message: Object.values(flowConfig.nodes).some((n) => n.typeId === 'ai-agent')
+            ? 'Hello — please give me a brief overview of what you can help with.'
+            : 'ping',
+        }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setRunResult({
+          status: data.status ?? 'ok',
+          response: data.reply_text ?? data.response ?? '',
+          flow_node: data.flow_node,
+          actions: data.outbound ?? data.actions,
+        })
+      } else {
+        setRunResult({ status: 'error', response: data?.message || `HTTP ${res.status}` })
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setRunResult({ status: 'error', response: `Run failed: ${msg}` })
+    } finally {
+      setRunning(false)
+    }
+  }, [buildFlowConfig, apiBaseUrl, tenantId])
 
   const onDragStart = useCallback((event: DragEvent, typeId: string) => {
     event.dataTransfer.setData('application/reactflow', typeId)
@@ -690,6 +757,18 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status,
             {loading ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
             <span className="ml-1 text-xs">Save</span>
           </Button>
+          {/* Run — executes the drawn flow through /workflow/execute (canvas now actually runs). */}
+          <Button
+            onClick={handleRun}
+            disabled={running || !masterEnabled}
+            size="xs"
+            variant="secondary"
+            title="Run this workflow"
+            className="hover:bg-accent/50"
+          >
+            {running ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
+            <span className="ml-1 text-xs">Run</span>
+          </Button>
         </div>
 
         {/* Status message */}
@@ -704,6 +783,34 @@ export default function WorkflowEditor({ initialConfig, onSave, loading, status,
           >
             <AlertCircle className="size-3" />
             <span>{status.message}</span>
+                    </div>
+        )}
+
+        {/* Run-result panel — shows the AI response when the canvas is Executed. */}
+        {runResult && (
+          <div
+            className={cn(
+              'absolute right-3 top-16 z-10 flex flex-col gap-2 max-w-sm rounded-lg border bg-popover p-3 text-xs shadow-lg backdrop-blur-sm',
+              runResult.status === 'error' && 'border-destructive/30',
+              runResult.status === 'ok' && 'border-primary/20'
+            )}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold">
+                {runResult.status === 'ok' ? '✅ Workflow ran' : '❌ Run failed'}
+              </span>
+              {runResult.flow_node && (
+                <span className="rounded bg-muted px-1.5 py-0.25 opacity-70">node: {runResult.flow_node}</span>
+              )}
+            </div>
+            <div className="max-h-48 overflow-y-auto rounded border border-border bg-background/60 p-2 text-foreground break-words whitespace-pre-wrap">
+              {runResult.response}
+            </div>
+            {runResult.actions && runResult.actions.length > 0 && (
+              <div className="text-muted-foreground">
+                Outputs: {JSON.stringify(runResult.actions)}
+              </div>
+            )}
           </div>
         )}
 

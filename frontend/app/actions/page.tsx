@@ -326,9 +326,18 @@ export default function TasksPage() {
                 <AICoderWidget widget={aiCoderWidget} />
               </div>
             </div>
-          ) : activeSection === 'knowledge' ? (
+                    ) : activeSection === 'knowledge' ? (
             <div className="h-full overflow-y-auto">
-              <KnowledgeBasePanel embedded />
+              <div className="mx-auto max-w-5xl px-6 py-8">
+                <div className="mb-8">
+                  <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">Knowledge</p>
+                  <h1 className="mt-1 font-display text-3xl font-bold tracking-tight">Knowledge Base</h1>
+                  <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                    Manage your knowledge base files, linked sources, and custom instructions.
+                  </p>
+                </div>
+                <KnowledgeBasePanel embedded />
+              </div>
             </div>
           ) : (
             <div className="h-full overflow-y-auto">

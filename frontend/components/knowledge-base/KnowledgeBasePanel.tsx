@@ -34,6 +34,11 @@ type Status = { kind: 'idle' | 'success' | 'error' | 'info'; message: string }
 // NEW: the n8n webhook that ingests a link (see n8n-ingest-new-link.json)
 const N8N_INGEST_WEBHOOK_URL = process.env.NEXT_PUBLIC_N8N_INGEST_WEBHOOK_URL || ''
 
+// Backend base URL — the MAIN API (main.py on :8000) owns /knowledge/* and /dashboard/*.
+// NOTE: we hardcode :8000 here (matching the existing /knowledge/delete call below) because
+// NEXT_PUBLIC_API_URL can point at the extension service on :8001, which only serves /activepieces/*.
+const BACKEND_URL = 'http://localhost:8000'
+
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -294,6 +299,33 @@ export function KnowledgeBasePanel({ embedded = false }: { embedded?: boolean } 
     }
   }, [tenantId, datatype, refreshFiles, refreshLinkedFiles])
 
+  // Load the per-AI-mode Custom Instruction when the selected datatype/mode changes.
+  // The backend falls back to the legacy profiles.custom_instruction column when no
+  // per-mode row exists, so this stays consistent with the profile value loaded on mount.
+  useEffect(() => {
+    if (!tenantId || !datatype) return
+    let cancelled = false
+    try {
+      fetch(
+        `${BACKEND_URL}/knowledge/custom-instruction?tenant_id=${encodeURIComponent(tenantId)}&mode=${encodeURIComponent(datatype)}`
+      )
+        .then((r) => r.json())
+        .then((data) => {
+          if (!cancelled && data.status === 'ok' && typeof data.instruction === 'string') {
+            setCustomInstruction(data.instruction)
+          }
+        })
+        .catch(() => {
+          /* keep the profile fallback already loaded */
+        })
+    } catch {
+      /* ignore */
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [tenantId, datatype])
+
   const pickFile = useCallback((f: File | null) => {
     if (!f) return
     if (f.type !== 'application/pdf') {
@@ -323,28 +355,30 @@ export function KnowledgeBasePanel({ embedded = false }: { embedded?: boolean } 
       setInstructionStatus({ kind: 'error', message: 'Please sign in before saving instructions.' })
       return
     }
+    if (!tenantId) {
+      setInstructionStatus({ kind: 'error', message: 'Unable to resolve your workspace. Please sign in again.' })
+      return
+    }
 
     setSavingInstruction(true)
-    setInstructionStatus({ kind: 'info', message: 'Saving custom instructions…' })
+    setInstructionStatus({ kind: 'info', message: 'Saving custom instructions for this mode…' })
 
     try {
-      const supabase = createClient()
-      
-      // Append .select() to verify a row was actually found and modified
-      const { data, error } = await supabase
-        .from('profiles')
-        .update({ custom_instruction: customInstruction })
-        .eq('id', userId)
-        .select() 
-
-      if (error) throw error
-
-      // CRITICAL CHECK: If data is empty, the update silently failed
-      if (!data || data.length === 0) {
-        throw new Error("Profile not found. You may need to create a profile row for this user first, or check your database RLS policies.")
+      // Persist per-AI-mode (the datatype stream the agent routes to) via the backend,
+      // which upserts a customer-service-provider row: datatype=custom_instructions,
+      // filename=<mode>, data={ instruction }. The agent reads this row per-mode.
+      const mode = datatype?.trim() || 'global'
+      const res = await fetch(`${BACKEND_URL}/knowledge/custom-instruction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: tenantId, mode, instruction: customInstruction }),
+      })
+      const payload = await res.json()
+      if (payload.status !== 'ok') {
+        throw new Error(payload.message || 'Failed to save custom instructions')
       }
 
-      setInstructionStatus({ kind: 'success', message: 'Custom instructions saved for your account.' })
+      setInstructionStatus({ kind: 'success', message: `Custom instructions saved for mode "${mode}".` })
     } catch (error) {
       setInstructionStatus({
         kind: 'error',
@@ -802,7 +836,7 @@ export function KnowledgeBasePanel({ embedded = false }: { embedded?: boolean } 
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <p className="text-sm text-muted-foreground">
-                    These instructions are stored in your profile and are used by the agent when answering questions.
+                    These instructions are stored per AI mode (the selected datatype below) and are used by the agent when answering questions in that mode.
                   </p>
                   <textarea
                     value={customInstruction}
@@ -811,7 +845,7 @@ export function KnowledgeBasePanel({ embedded = false }: { embedded?: boolean } 
                     className="min-h-35 w-full rounded-lg border border-input bg-card px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
                   />
                   <div className="flex flex-wrap items-center justify-between gap-3">
-                    <p className="text-xs text-muted-foreground">Saved only to your account profile.</p>
+                    <p className="text-xs text-muted-foreground">Saved per mode: {datatype?.trim() || 'global'}.</p>
                     <Button type="button" size="sm" onClick={handleSaveCustomInstruction} disabled={savingInstruction || !userId}>
                       {savingInstruction ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
                       {savingInstruction ? 'Saving…' : 'Save instructions'}

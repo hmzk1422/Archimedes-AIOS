@@ -139,13 +139,23 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         placeholder: '0.2',
         type: 'number',
       },
+      {
+        key: 'mode',
+        label: 'AI Mode (knowledge base + instructions)',
+        placeholder: 'Select a mode',
+        type: 'select',
+        options: [
+          { label: 'Statarb', value: 'statarb' },
+          { label: 'Investment', value: 'investment' },
+        ],
+      },
     ],
     ports: [
       { id: 'in-message', label: 'Input', type: 'input' },
       { id: 'out-response', label: 'Response', type: 'output' },
       { id: 'out-hitl', label: 'Needs Approval', type: 'output' },
     ],
-    defaultConfig: { system_prompt: '', temperature: '0.2' },
+    defaultConfig: { system_prompt: '', temperature: '0.2', mode: '' },
   },
 
   'hitl-gate': {

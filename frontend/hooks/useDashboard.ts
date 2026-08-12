@@ -9,6 +9,7 @@ import type { WidgetDataPayload } from '@/components/dashboard/widgets/chart-dat
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 
+const GRID_COLS = 12
 const DEFAULT_WIDGETS: DashboardWidget[] = []
 
 /**
@@ -84,13 +85,19 @@ export function useDashboard() {
     }
   }, [])
 
-  // ── Initial load ─────────────────────────────────────────────────────────────
+    // ── Initial load ─────────────────────────────────────────────────────────────
+  // Fetch the saved layout FIRST (it's small and fast), then fetch widget data.
+  // This avoids a slow widget-data API call (4 × 500-record queries) from
+  // blocking the layout render — the canvas shows immediately while data loads.
   useEffect(() => {
     if (!tenantId) return
-    setLoading(true)
-    Promise.all([fetchLayout(tenantId), fetchWidgetData(tenantId)]).finally(() => {
+    const load = async () => {
+      setLoading(true)
+      await fetchLayout(tenantId)
+      await fetchWidgetData(tenantId)
       setLoading(false)
-    })
+    }
+    load()
   }, [tenantId, fetchLayout, fetchWidgetData])
 
   // ── Auto-save (debounced) ───────────────────────────────────────────────────
@@ -111,20 +118,31 @@ export function useDashboard() {
     }
   }, [])
 
-  const debouncedSave = useCallback((layout: DashboardWidget[], tid: string) => {
+    const debouncedSave = useCallback((layout: DashboardWidget[], tid: string) => {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
-    saveTimeoutRef.current = setTimeout(() => saveLayout(layout, tid), 1500)
+    saveTimeoutRef.current = setTimeout(() => saveLayout(layout, tid), 500)
   }, [saveLayout])
 
-  // ── Widget actions ───────────────────────────────────────────────────────────
+    // ── Widget actions ───────────────────────────────────────────────────────────
   const addWidget = useCallback((type: string) => {
     const def = getWidgetDefinition(type)
     if (!def) return
     setWidgets((prev) => {
       const newWidget = createDefaultWidget(type)
-      const maxX = Math.max(0, ...prev.map((w) => w.x + w.w))
-      newWidget.x = maxX
-      newWidget.y = 0
+      // Place new widgets at the bottom of the canvas (after the lowest widget),
+      // rather than at the top-right corner where they can get lost after a resize
+      // or when the canvas has grown vertically.
+      if (prev.length === 0) {
+        newWidget.x = 0
+        newWidget.y = 0
+      } else {
+        const maxRowEnd = Math.max(0, ...prev.map((w) => (w.y || 0) + (w.h || 2)))
+        newWidget.x = 0
+        newWidget.y = maxRowEnd
+      }
+      // Snap x so the widget doesn't extend past the right edge
+      const maxX = GRID_COLS - (newWidget.w || 2)
+      newWidget.x = Math.min(newWidget.x, maxX)
       const newWidgets = [...prev, newWidget]
       if (tenantId) debouncedSave(newWidgets, tenantId)
       return newWidgets
