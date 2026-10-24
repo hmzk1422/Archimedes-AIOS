@@ -6,6 +6,8 @@ import { createClient } from '@/utils/supabase/client'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import WorkflowEditor from '@/components/nodes/WorkflowEditor'
+import { getWorkflowExtensionAction, saveWorkflowExtensionAction } from '@/app/actions'
+import { resolveTenantId } from '@/lib/tenant'
 import type { FlowConfig, NodeConfig, EdgeConfig, NodeTypeId } from '@/components/nodes/types'
 
 type Status = { kind: 'idle' | 'success' | 'error' | 'info'; message: string }
@@ -161,24 +163,19 @@ export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boo
         return
       }
 
-      if (!cancelled) setTenantId(user.id)
+      // The agentic workflow lives on the workspace OWNER's profile row (the
+      // row the AI runtime executes), shared by the admin + every team member.
+      // Resolve the workspace id instead of using the per-user id, otherwise a
+      // developer opens their own private copy and never sees the admin's flow.
+      const workspaceId = await resolveTenantId(user.id)
+      if (!cancelled) setTenantId(workspaceId)
 
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('extension')
-        .eq('id', user.id)
-        .maybeSingle()
+      const { extension } = await getWorkflowExtensionAction()
 
       if (cancelled) return
 
-      if (error) {
-        setStatus({ kind: 'error', message: 'Failed to load extension settings.' })
-      } else {
-        // Convert legacy config OR use the new flow format
-        const ext = data?.extension as Record<string, unknown> | null
-        setFlowConfig(legacyToFlowConfig(ext))
-      }
-
+      // Convert legacy config OR use the new flow format
+      setFlowConfig(legacyToFlowConfig(extension))
       setChecking(false)
     }
 
@@ -192,24 +189,13 @@ export default function ExtensionPage({ fullScreen = false }: { fullScreen?: boo
   const handleSave = useCallback(async (config: FlowConfig) => {
     setLoading(true)
     setStatus({ kind: 'info', message: 'Saving workflow...' })
-    const supabase = createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-
-    if (!user) {
-      setStatus({ kind: 'error', message: 'You must be logged in.' })
-      setLoading(false)
-      return
-    }
 
     try {
-      // Convert to legacy format for backend compatibility
+      // Convert to legacy format for backend compatibility, then persist it to
+      // the workspace OWNER's row (server action + service role) so the whole
+      // team edits the same flow the AI runtime executes — not a per-user copy.
       const legacyConfig = flowToLegacyConfig(config)
-      const { error } = await supabase
-        .from('profiles')
-        .update({ extension: legacyConfig })
-        .eq('id', user.id)
-
-      if (error) throw error
+      await saveWorkflowExtensionAction(legacyConfig)
 
       setFlowConfig(config)
       setStatus({ kind: 'success', message: 'Workflow saved successfully.' })

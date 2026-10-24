@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from gemini import ask_agent, get_retrievers_for_tenant, preprocess, delete_knowledge_file, delete_all_tenant_data, fetch_mode_custom_instruction, get_tenant_active_mode
 from workflow_engine import run_flow
-from telemetry_sdk import get_telemetry, reset_telemetry
+from telemetry_sdk import get_telemetry, reset_telemetry, record_metric
 from supabase import create_client, Client
 from hitl import fetch_hitl_config, evaluate_hitl, HITLDecision, detect_sentiment, fetch_task_names
 
@@ -209,7 +209,7 @@ class WorkflowRunRequest(BaseModel):
     mode: str | None = None
     # When present, this is the live canvas config (drawn flow), used directly
     # instead of reloading the tenant's saved flow — enables Run-as-drawn.
-    flow: Optional[dict] = None
+    flow: dict | None = None
 
 
 @app.get("/knowledge/custom-instruction")
@@ -446,6 +446,204 @@ async def telemetry_evaluation(request: EvaluationRecordRequest):
 
 
 # ──────────────────────────────────────────────
+# Metrics API Endpoints
+# ──────────────────────────────────────────────
+
+
+class MetricsRequest(BaseModel):
+    """A single metric write — mirrors what the canvas `metrics` node emits."""
+    tenant_id: str
+    metric_name: str
+    value: float | None = None
+    metric_type: str = "counter"
+    tags: dict | None = None
+    value_expression: str | None = None
+    evaluation_name: str | None = None
+    score_min: float | None = None
+    score_max: float | None = None
+    unit: str | None = None
+    run_id: str | None = None
+    node_id: str | None = None
+    bot_id: str | None = None
+
+
+class MetricsBulkRequest(BaseModel):
+    """Batch write metrics; every item must share the same tenant_id (RLS scope)."""
+    metrics: list[MetricsRequest]
+
+
+@app.post("/metrics")
+async def record_metric_endpoint(request: MetricsRequest):
+    """Persist a metric row (datatype=telemetry_metrics) for the calling tenant.
+
+    Tenant isolation is enforced by RLS + tenant_id scoping in the writer; a
+    request cannot write a row for another tenant. Mirrors the engine's
+    `metrics` output node write path (POST /metrics or /metrics/bulk).
+    """
+    try:
+        record_metric(
+            tenant_id=request.tenant_id, metric_name=request.metric_name,
+            value=request.value, metric_type=request.metric_type, tags=request.tags,
+            value_expression=request.value_expression, evaluation_name=request.evaluation_name,
+            score_min=request.score_min, score_max=request.score_max, unit=request.unit,
+            run_id=request.run_id, node_id=request.node_id, bot_id=request.bot_id,
+        )
+        return {"status": "ok", "message": f"Metric '{request.metric_name}' recorded"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/metrics/bulk")
+async def record_metric_bulk_endpoint(request: MetricsBulkRequest):
+    """Batch write metrics for a tenant in one call."""
+    if not request.metrics:
+        return {"status": "ok", "count": 0, "message": "No metrics provided"}
+    tenant_id = request.metrics[0].tenant_id
+    for item in request.metrics:
+        if item.tenant_id != tenant_id:
+            return {"status": "error", "message": "All metrics must share the same tenant_id"}
+        record_metric(
+            tenant_id=item.tenant_id, metric_name=item.metric_name, value=item.value,
+            metric_type=item.metric_type, tags=item.tags, value_expression=item.value_expression,
+            evaluation_name=item.evaluation_name, score_min=item.score_min,
+            score_max=item.score_max, unit=item.unit, run_id=item.run_id,
+            node_id=item.node_id, bot_id=item.bot_id,
+        )
+    return {
+        "status": "ok",
+        "count": len(request.metrics),
+        "message": f"{len(request.metrics)} metrics recorded",
+    }
+
+
+@app.get("/metrics/{tenant_id}")
+async def get_metrics(
+    tenant_id: str,
+    metric_name: str | None = None,
+    group_by: str | None = None,
+    agg: str = "avg",
+    field: str = "value",
+    tags: str | None = None,
+    limit: int = 500,
+):
+    """Config-driven metric aggregation powering dynamic dashboard widgets.
+
+    Pulls `telemetry_metrics` rows for a tenant (via the same generic
+    customer-service-provider table the canvas `metrics` node writes to), then
+    filters by metric_name and tag filters, groups by a dynamic dimension and
+    aggregates a numeric field.
+
+    The grouping dimension (`group_by`) can be:
+      * a dotted tags path, e.g. ``tags.channel`` or ``tags.keyword``
+      * ``metric_name`` to compare several metrics side-by-side
+      * any top-level key of the record, e.g. ``evaluation_name`` or ``run_id``
+
+    `agg` is one of avg|sum|max|min|count|distinct. `tags` is a URL-encoded JSON
+    filter, e.g. ``{"risk":"high"}`` (all pairs must match on each row).
+    """
+    try:
+        SUPABASE_KEY = os.getenv("SUPADB_API")
+        rest_url = os.getenv("CUSTOMER_SERVICE_PROVIDER")
+        if not rest_url or not SUPABASE_KEY:
+            return {"status": "error", "message": "Database not configured"}
+
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        query = (
+            f"{rest_url}?datatype=eq.telemetry_metrics&tenant_id=eq.{tenant_id}"
+            f"&order=timestamp.desc&limit={limit}"
+        )
+        resp = requests.get(query, headers=headers, timeout=10)
+        rows = resp.json() if resp.status_code == 200 else []
+
+        # metric_name / tags live inside the `data` jsonb column
+        raw = [r.get("data", {}) for r in rows if isinstance(r.get("data"), dict)]
+
+        if metric_name:
+            raw = [d for d in raw if d.get("metric_name") == metric_name]
+
+        tag_filter: dict = {}
+        if tags:
+            try:
+                parsed = json.loads(tags)
+                if isinstance(parsed, dict):
+                    tag_filter = parsed
+            except Exception:
+                tag_filter = {}
+        if tag_filter:
+            kept = []
+            for d in raw:
+                rec_tags = d.get("tags") if isinstance(d.get("tags"), dict) else {}
+                if all(rec_tags.get(k) == v for k, v in tag_filter.items()):
+                    kept.append(d)
+            raw = kept
+
+        def _num(v):
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v)
+                except Exception:
+                    return None
+            return None
+
+        def _group_label(d, gdim):
+            if gdim.startswith("tags."):
+                rec_tags = d.get("tags") if isinstance(d.get("tags"), dict) else {}
+                return str(rec_tags.get(gdim[5:], ""))
+            if gdim == "metric_name":
+                return str(d.get("metric_name", ""))
+            return str(d.get(gdim, ""))
+
+        groups: dict[str, list[float]] = {}
+        for d in raw:
+            val = _num(d.get(field))
+            if val is None:
+                continue
+            label = _group_label(d, group_by) if group_by else "__all__"
+            groups.setdefault(label, []).append(val)
+
+        def _apply(vals):
+            if not vals:
+                return None
+            if agg == "sum":
+                return round(sum(vals), 4)
+            if agg == "max":
+                return round(max(vals), 4)
+            if agg == "min":
+                return round(min(vals), 4)
+            if agg == "count":
+                return len(vals)
+            if agg == "distinct":
+                return len(set(vals))
+            return round(sum(vals) / len(vals), 4)  # avg
+
+        out = []
+        for label, vals in groups.items():
+            out.append({
+                "name": label if group_by else (metric_name or "all"),
+                "value": _apply(vals),
+                "count": len(vals),
+            })
+
+        return {
+            "status": "ok",
+            "tenant_id": tenant_id,
+            "metric_name": metric_name,
+            "group_by": group_by,
+            "agg": agg,
+            "count": len(out),
+            "data": out,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # HITL (Human-In-The-Loop) Endpoints
 # ──────────────────────────────────────────────
 

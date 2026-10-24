@@ -163,6 +163,196 @@ def test_saved_flow_is_loaded_from_tenant_when_no_override():
         del we.get_tenant_flow  # restore
 
 
+def _ai_node(config=None):
+    return {
+        "typeId": "ai-agent",
+        "label": "AI",
+        "position": {"x": 0, "y": 0},
+        "config": config or {"mode": "statarb", "system_prompt": ""},
+        "enabled": True,
+    }
+
+
+def test_delay_router_loop_and_chain_are_engine_backed():
+    """delay/router/loop must be executed (not 'handled: False') and a drawn
+    chain ai-agent -> delay -> http-response must traverse end to end."""
+    flow = {
+        "masterEnabled": True,
+        "nodes": {
+            "n_ai": _ai_node(),
+            "n_delay": {
+                "typeId": "delay", "label": "Wait", "position": {"x": 1, "y": 0},
+                "config": {"delay_seconds": "3", "delay_mode": "fixed_seconds"},
+                "enabled": True,
+            },
+            "n_hr": {
+                "typeId": "http-response", "label": "Respond", "position": {"x": 2, "y": 0},
+                "config": {"status_code": "202"}, "enabled": True,
+            },
+        },
+        "edges": [
+            {"id": "e1", "source": "n_ai", "sourceHandle": "out-response", "target": "n_delay", "targetHandle": "in"},
+            {"id": "e2", "source": "n_delay", "target": "n_hr", "targetHandle": "in"},
+        ],
+    }
+    we._ask_agent = make_ask_agent(response="after-delay")
+    res = we.run_flow("t1", "hi", flow=flow)
+    executed = {a["node"]: a for a in res["actions"]}
+    assert executed["delay"]["delay_seconds"] == 3, executed
+    assert executed["http-response"]["status_code"] == "202", executed
+    assert all("handled" not in a for a in res["actions"]), res["actions"]
+
+
+def test_router_and_loop_arguments_respected():
+    """router and loop read their real arguments from config."""
+    flow = {
+        "masterEnabled": True,
+        "nodes": {
+            "n_ai": _ai_node(),
+            "n_loop": {
+                "typeId": "loop", "label": "Loop", "position": {"x": 1, "y": 0},
+                "config": {"collection": "[1,2,3]", "item_var": "x", "max_iterations": "10"},
+                "enabled": True,
+            },
+            "n_router": {
+                "typeId": "router", "label": "Pick", "position": {"x": 2, "y": 0},
+                "config": {"field": "{{cat}}", "routes": '[{"value":"a"}]', "default_route": "fallback"},
+                "enabled": True,
+            },
+        },
+        "edges": [
+            {"id": "e1", "source": "n_ai", "sourceHandle": "out-response", "target": "n_loop", "targetHandle": "in"},
+            {"id": "e2", "source": "n_ai", "sourceHandle": "out-response", "target": "n_router", "targetHandle": "in"},
+        ],
+    }
+    we._ask_agent = make_ask_agent(response="v")
+    res = we.run_flow("t1", "hi", flow=flow)
+    executed = {a["node"]: a for a in res["actions"]}
+    assert executed["loop"]["iterations"] == 3, executed
+    assert executed["loop"]["item_var"] == "x", executed
+    assert executed["router"]["routed_to"] == "fallback", executed
+    assert all("handled" not in a for a in res["actions"]), res["actions"]
+
+
+def test_http_request_is_engine_backed():
+    """http_request makes a real outbound call and reports the status code."""
+    flow = {
+        "masterEnabled": True,
+        "nodes": {
+            "n_ai": _ai_node(),
+            "n_req": {
+                "typeId": "http_request", "label": "API", "position": {"x": 1, "y": 0},
+                "config": {"method": "POST", "url": "https://x.test/webhook",
+                           "headers": "{}", "body": '{"k": 1}'},
+                "enabled": True,
+            },
+        },
+        "edges": [
+            {"id": "e1", "source": "n_ai", "sourceHandle": "out-response", "target": "n_req", "targetHandle": "in"},
+        ],
+    }
+    we._ask_agent = make_ask_agent(response="v")
+
+    class _Resp:
+        status_code = 200
+
+    real_request = we.requests.request
+    called = {}
+
+    def fake_request(method, url, json=None, headers=None, timeout=None):
+        called["method"] = method
+        called["url"] = url
+        return _Resp()
+
+    we.requests.request = fake_request
+    try:
+        res = we.run_flow("t1", "hi", flow=flow)
+    finally:
+        we.requests.request = real_request
+
+    assert res["actions"][0]["node"] == "http_request", res["actions"]
+    assert res["actions"][0]["status_code"] == 200, res["actions"]
+    assert called["method"] == "POST", called
+    assert called["url"] == "https://x.test/webhook", called
+    assert all("handled" not in a for a in res["actions"]), res["actions"]
+
+
+def test_metrics_node_writes_to_telemetry():
+    """A `metrics` output node resolves its value_template against the AI result
+    and persists a telemetry_metrics record (run_id / node_id included).
+
+    Mirrors test_http_request_is_engine_backed — the external Supabase write is
+    patched so no network/DB is required.
+    """
+    flow = {
+        "masterEnabled": True,
+        "nodes": {
+            "n_ai": _ai_node(),
+            "n_met": {
+                "typeId": "metrics",
+                "label": "Metric",
+                "id": "n_met",
+                "position": {"x": 400, "y": 0},
+                "config": {
+                    "metric_name": "response_time",
+                    "metric_type": "gauge",
+                    "value_template": "{{response.duration_ms}}",
+                    "tags": '{"channel":"api"}',
+                    "unit": "ms",
+                },
+                "enabled": True,
+            },
+        },
+        "edges": [
+            {"id": "e1", "source": "n_ai", "sourceHandle": "out-response", "target": "n_met", "targetHandle": "in"},
+        ],
+    }
+    # The AI result carries a structured field the template can read.
+    we._ask_agent = make_ask_agent(response="hi", extra={"duration_ms": 42})
+
+    captured = {}
+
+    def fake_record(tenant_id, record):
+        captured["tenant"] = tenant_id
+        captured["record"] = record
+        return None
+
+    real_record = we._record_metric
+    we._record_metric = fake_record
+    try:
+        res = we.run_flow("tenant-1", "hello", flow=flow)
+    finally:
+        we._record_metric = real_record
+
+    assert captured["tenant"] == "tenant-1", captured
+    rec = captured["record"]
+    assert rec["metric_name"] == "response_time", rec
+    assert rec["metric_type"] == "gauge", rec
+    assert rec["value"] == 42.0, rec
+    assert rec["value_expression"] == "{{response.duration_ms}}", rec
+    assert rec["tags"] == {"channel": "api"}, rec
+    assert rec["unit"] == "ms", rec
+    assert rec["node_id"] == "n_met", rec
+    assert rec["run_id"], rec
+    assert "ts" in rec, rec
+
+    action = res["actions"][0]
+    assert action["node"] == "metrics", res["actions"]
+    assert action["recorded"] is True, res["actions"]
+    assert action["value"] == 42.0, res["actions"]
+    assert action["metric_type"] == "gauge", res["actions"]
+    print("  [ok] metrics_node_writes_to_telemetry:", rec)
+
+
+def test_new_nodes_are_handled_not_unhandled():
+    """Guardrail for #3: delay/router/loop/http_request/http-response must not
+    fall through to 'handled: False' when executed by the engine."""
+    for t in ("delay", "router", "loop", "http-response", "http_request", "metrics"):
+        handled = we._execute_output_node({"typeId": t, "config": {}}, "tenant-1", "r")
+        assert "handled" not in handled, (t, handled)
+        assert "skipped" in handled or "error" in handled or "status_code" in handled or "delay_seconds" in handled or "iterations" in handled or "routed_to" in handled, (t, handled)
+
+
 if __name__ == "__main__":
     test_ai_node_mode_and_system_prompt_propagated()
     print("[ok] ai_node_mode_and_system_prompt_propagated")
@@ -174,5 +364,15 @@ if __name__ == "__main__":
     print("[ok] hitl_output_only_traversed_when_pending")
     test_saved_flow_is_loaded_from_tenant_when_no_override()
     print("[ok] saved_flow_is_loaded_from_tenant_when_no_override")
+    test_delay_router_loop_and_chain_are_engine_backed()
+    print("[ok] delay_router_loop_and_chain_are_engine_backed")
+    test_router_and_loop_arguments_respected()
+    print("[ok] router_and_loop_arguments_respected")
+    test_http_request_is_engine_backed()
+    print("[ok] http_request_is_engine_backed")
+    test_new_nodes_are_handled_not_unhandled()
+    print("[ok] new_nodes_are_handled_not_unhandled")
+    test_metrics_node_writes_to_telemetry()
+    print("[ok] metrics_node_writes_to_telemetry")
     print("ALL WORKFLOW ENGINE TESTS PASSED")
 

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
 import { Plus, Loader2, Trash2, Save, FileJson, Shield, Puzzle, ListTodo, Workflow, Bot, Database } from 'lucide-react'
 import { createClient } from '@/utils/supabase/client'
+import { resolveTenantId } from '@/lib/tenant'
 import { DashboardNav } from '@/components/dashboard/dashboard-nav'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -77,12 +78,17 @@ export default function TasksPage() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
+    // Agent Tasks belong to the WORKSPACE (shared by admin + team members),
+    // not the individual user — otherwise the developer and admin each get their
+    // own private list and the AI (scoped to the workspace) ignores one of them.
+    const workspaceId = await resolveTenantId(user.id)
+
     const { data, error } = await supabase
       .from(TABLE_NAME)
       .select('id, data')
       .eq('datatype', 'tasks')
       .eq('filename', 'tasks')
-      .eq('tenant_id', user.id)
+      .eq('tenant_id', workspaceId)
       .maybeSingle()
 
     if (error) {
@@ -150,6 +156,9 @@ export default function TasksPage() {
       return
     }
 
+    // Scope to the workspace id so tasks are shared (mirrors fetchTasksData).
+    const workspaceId = await resolveTenantId(user.id)
+
     try {
       if (rowId) {
         // IMPORTANT: Fetch existing data first to preserve HITL settings
@@ -160,7 +169,7 @@ export default function TasksPage() {
           .eq('id', rowId)
           .single()
 
-        let mergedData: Record<string, unknown> = { tasks: updatedTasks }
+        const mergedData: Record<string, unknown> = { tasks: updatedTasks }
         if (existingRow?.data) {
           let raw = existingRow.data
           if (typeof raw === 'string') {
@@ -187,7 +196,7 @@ export default function TasksPage() {
             datatype: 'tasks',
             filename: 'tasks',
             data: { tasks: updatedTasks },
-            tenant_id: user.id
+            tenant_id: workspaceId
           }])
           .select('id')
           .single()

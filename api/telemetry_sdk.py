@@ -81,7 +81,7 @@ def _submit_to_supabase(tenant_id: str, datatype: str, payload: dict) -> None:
 
         body = {
             "datatype": datatype,
-            "filename": f"telemetry_{payload.get('event_type', 'unknown')}",
+                        "filename": payload.get("filename") or f"telemetry_{payload.get('event_type', 'unknown')}",
             "data": payload,
             "tenant_id": tenant_id,
         }
@@ -406,3 +406,45 @@ def reset_telemetry(tenant_id: str | None = None, service_name: str = "relay-age
         inst = _instances.pop(key, None)
         if inst:
             inst.shutdown()
+
+
+def record_metric(
+    tenant_id: str,
+    metric_name: str,
+    value: float | int | None = None,
+    metric_type: str = "counter",
+    tags: dict | None = None,
+    value_expression: str | None = None,
+    evaluation_name: str | None = None,
+    score_min: float | None = None,
+    score_max: float | None = None,
+    unit: str | None = None,
+    run_id: str | None = None,
+    node_id: str | None = None,
+    bot_id: str | None = None,
+) -> None:
+    """Persist a metrics-node metric to Supabase (datatype=telemetry_metrics).
+
+    Convenience wrapper around ``_submit_to_supabase`` for the richer payload the
+    canvas `metrics` node (and POST /metrics) emits — metric_name, metric_type,
+    value, value_expression, tags, evaluation_name, score_min/max, run_id/node_id,
+    bot_id. Best-effort: silently no-ops when SUPADB_API / CUSTOMER_SERVICE_PROVIDER
+    aren't configured.
+    """
+    record = {
+        "metric_name": metric_name,
+        "metric_type": metric_type,
+        "value": value,
+        "tags": tags or {},
+        "value_expression": value_expression,
+        "evaluation_name": evaluation_name,
+        "score_min": score_min,
+        "score_max": score_max,
+        "unit": unit,
+        "run_id": run_id,
+        "node_id": node_id,
+        "bot_id": bot_id,
+        "filename": f"metric_{metric_name}",
+        "timestamp": time.time_ns(),
+    }
+    _submit_to_supabase(tenant_id, "telemetry_metrics", record)

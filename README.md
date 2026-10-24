@@ -1,128 +1,118 @@
-# AI Customer Service System
-We transform customer support from a cost center into a strategic asset.
+# Archimedees-aios
 
-Most AI solutions are simple chatbots that offer generic, scripted answers. We build autonomous, agentic AI that understands intent, remembers context, and executes workflows across your entire business stack—delivering the speed of AI with the precision and reliability of a human expert.
+Archimedees-aios is an enterprise AI operating system for creating and managing tenant-isolated AI agents. It provides workspaces, role-based access control (RBAC), a visual workflow builder, and cloud-hosted services. Agent integrations run through n8n or Activepieces. The current example connects a Telegram bot to an AI agent.
 
-# What we Solve
-Businesses today are drowning in high-volume, low-complexity support tickets that drain human energy and slow down growth [1.3.1]. Our platform solves this by:
-- Eliminating bottlenecks: Automating routine tasks (order status, account updates, FAQs) 24/7 without needing to scale your headcount
-- Context-Aware Resolution: Unlike basic bots, our agents possess "episodic memory," remembering past interactions to deliver hyper-personalized support
-- Safe Autonomy: Through a unique "Multi-Agent" validation architecture, we ensure accuracy, minimize hallucinations, and guarantee seamless handoffs to human agents whenever complex judgment is required
+## Requirements
 
-# How it Works
-- Reasoning & Planning: Our agents don't just "chat"—they break down complex, multi-step customer requests into logical, actionable plans
-- Tool-Use Integration: We connect the AI directly to your CRM, order management systems, and knowledge bases to execute real-time actions, not just provide information
-- Data-Driven Reliability: By utilizing RAG (Retrieval-Augmented Generation) and structured Markdown knowledge bases, our agents respond only based on your verified, up-to-date company data
+- Python 3.11+
+- Node.js 20+ and npm/npx
+- Supabase project credentials
+- ngrok for exposing the webhook service to Telegram and Activepieces
+- Activepieces (default) or n8n (optional)
 
-# Key Features
-- Omnichannel Consistency: A unified experience across WhatsApp, SMS, Email, and Voice
-- Human-in-the-Loop: A native "Critic" pattern that monitors agent output, ensures compliance, and manages safe escalations to human reps with full interaction history
-- Scalable Efficiency: Built for rapid deployment in high-volume enterprise environments
+## Configure environment
 
-# Technical Guideline
+Create or update `api/.env`:
 
-The platform supports two automation engines for routing Telegram (and other
-channel) messages into the AI engine:
+```dotenv
+# Supabase
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPADB_API=YOUR_SUPABASE_SERVICE_OR_SECRET_KEY
 
-| Engine | Start command | Port | Notes |
-|--------|---------------|------|-------|
-| **n8n** | `docker run ... n8n` | 5678 | Original workflow engine |
-| **Activepieces** | `npx -y activepieces` | 3001 | No Docker required — avoids Docker freeze |
+# Telegram bot token from BotFather
+TELEGRAM_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
 
-> ⚠️ If `docker` freezes on your machine, use the **Activepieces** path. It runs
-> entirely via `npx` (Node.js) with local SQLite/file storage, no Docker needed.
+# Activepieces API settings
+ACTIVEPIECES_URL=http://localhost:3001
+ACTIVEPIECES_API_KEY=YOUR_ACTIVEPIECES_API_KEY
+ACTIVEPIECES_TIMEOUT=15
 
-## Installs
-**Requirements:** ngrok, nodejs, python, and **either** docker+n8n **or** just nodejs (for Activepieces)
+# Public URL for the extension API (ngrok forwards port 8001)
+AI_ENGINE_URL=https://YOUR_NGROK_DOMAIN
 
-### Option A — n8n (Docker)
-```
-docker run -it --rm -p 5678:5678 -v "C:\Users\Himaska\.n8n:/home/node/.n8n" --name n8n docker.n8n.io/n8nio/n8n
-```
-Then import `api/n8n-extension-workflow.json` into n8n.
+# Main AI endpoint used by the extension service
+AI_ENDPOINT_URL=http://localhost:8000/workflow/execute
 
-### Option B — Activepieces (no Docker, recommended if Docker freezes)
-```
-npx -y activepieces
-```
-Activepieces starts on `http://localhost:3001`. On first run it will download
-its packages; subsequent runs are faster. Data is stored locally in `./ap_data`.
-
-## Running the Platform
-
-### One-command launcher (manager.py)
-The easiest way to run everything is the manager script:
-```
-python manager.py install          # installs frontend + API deps
-python manager.py run --platform activepieces   # starts Activepieces + all services
-python manager.py run --platform n8n             # starts n8n-style (ngrok → 5678)
+# Optional model and email settings used by the AI and human-approval features
+GOOGLE_API_KEY=YOUR_GOOGLE_AI_API_KEY
+LLAMA_CLOUD_API_KEY=YOUR_LLAMA_CLOUD_API_KEY
+SMTP_HOST=YOUR_SMTP_HOST
+SMTP_PORT=587
+SMTP_USER=YOUR_SMTP_USERNAME
+SMTP_PASS=YOUR_SMTP_PASSWORD
+SMTP_FROM=YOUR_SENDER_ADDRESS
 ```
 
-### Manual startup
-**Frontend**
-Go to frontend folder.
+Create `frontend/.env.local` with the Supabase project URL and public anon key used by the web app:
+
+```dotenv
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLIC_ANON_KEY
+NEXT_PUBLIC_API_URL=http://localhost:8001
 ```
+
+Get an Activepieces API key from **Settings → API Keys** in Activepieces. Set `AI_ENGINE_URL` to the public ngrok URL forwarding to port `8001`; Activepieces must be able to reach this URL to send Telegram messages to the agent.
+
+## Commands
+
+```sh
+python manager.py install                       # Install frontend and API dependencies
+python manager.py start                         # Master command: start Activepieces, APIs, frontend, and ngrok
+python manager.py start --platform n8n          # Start the platform using n8n instead
+```
+
+The default launcher starts the web app on port `3000`, the AI API on `8000`, the extension/webhook API on `8001`, Activepieces on `3001`, and the company demo API on `8002`. Press Ctrl+C in the launcher terminal to stop the services.
+
+## Activepieces and Telegram
+
+1. Before startup, set `ACTIVEPIECES_URL`, `ACTIVEPIECES_API_KEY`, and `TELEGRAM_TOKEN` in `api/.env`. The Activepieces key comes from **Settings → API Keys** at `http://localhost:3001` after its first launch; restart the platform after adding the key.
+2. Start the platform with `python manager.py start`. Set `AI_ENGINE_URL` to the public ngrok URL forwarding to port `8001`, then open `http://localhost:3001`.
+3. Check the Activepieces connection and deploy the Telegram workflow:
+
+```sh
+curl http://localhost:8001/activepieces/status
+curl -X POST http://localhost:8001/activepieces/deploy \
+  -H "Content-Type: application/json" \
+  -d '{"publish":true}'
+```
+
+4. Configure the Telegram connection and agent workflow in the workspace at `http://localhost:3000`.
+
+## Activepieces commands
+
+```sh
+curl http://localhost:8001/activepieces/flows                 # List deployed flows
+curl http://localhost:8001/activepieces/connections           # List saved connections
+curl -X POST http://localhost:8001/activepieces/flows/FLOW_ID/enable  # Enable a flow
+curl -X POST http://localhost:8001/activepieces/flows/FLOW_ID/disable # Disable a flow
+curl -X DELETE http://localhost:8001/activepieces/flows/FLOW_ID       # Delete a flow
+```
+
+## Manual startup
+
+Use these commands instead of the master launcher when you need to start services individually:
+
+```sh
 cd frontend
 npm install
 npm run dev
 ```
-**API**
-Go to API folder.
-```
+
+```sh
 cd api
 python -m venv venv
-venv\scripts\activate.ps1
+# Windows: .\venv\Scripts\Activate.ps1
+# macOS/Linux: source venv/bin/activate
 python -m pip install -r requirements.txt
-```
-**Starting python files**
-There are 2 files. `company-api` is the simulated third-party side communicating with our platform. `main` is our platform.
-```
-python -m uvicorn main:app --reload
-python -m company-api
-python -m extension
-ngrok http 5678          # for n8n
-# OR
-ngrok http 8001          # for activepieces (extension service)
+python -m uvicorn main:app --reload --port 8000
+python -m uvicorn extension:app --reload --port 8001
+python -m uvicorn company-api:app --reload --port 8002
 ```
 
-## Connecting to Activepieces
-Once Activepieces is running on `http://localhost:3001` and the extension
-service is on `http://localhost:8001`:
+Run Activepieces independently with:
 
-1. **Check connectivity:**
-   ```
-   curl http://localhost:8001/activepieces/status
-   ```
-2. **Deploy the Telegram routing flow** (from `api/activepieces-flow.json`):
-   ```
-   curl -X POST http://localhost:8001/activepieces/deploy -H "Content-Type: application/json" -d "{\"publish\": true}"
-   ```
-   This also upserts a Telegram bot connection using the `TELEGRAM_TOKEN` from `api/.env`.
-3. **List flows / connections:**
-   ```
-   curl http://localhost:8001/activepieces/flows
-   curl http://localhost:8001/activepieces/connections
-   ```
-4. **Enable / disable / delete a flow:**
-   ```
-   curl -X POST http://localhost:8001/activepieces/flows/<id>/enable
-   curl -X POST http://localhost:8001/activepieces/flows/<id>/disable
-   curl -X DELETE http://localhost:8001/activepieces/flows/<id>
-   ```
-
-### Activepieces environment variables (`api/.env`)
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ACTIVEPIECES_URL` | `http://localhost:3001` | Activepieces instance URL |
-| `ACTIVEPIECES_API_KEY` | _(empty)_ | API key from Activepieces UI (Settings → API Keys) |
-| `ACTIVEPIECES_TIMEOUT` | `15` | Request timeout in seconds |
-| `AI_ENGINE_URL` | `http://localhost:8001` | URL the Activepieces flow calls back into |
-
-# Ports Used
+```sh
+npx -y activepieces
 ```
-npm run dev (frontend)        -> port 3000
-main (the AI engine)          -> port 8000
-extension (webhook/dispatch)  -> port 8001
-company (company side)        -> port 8002
-n8n (optional)                -> port 5678
-activepieces (no Docker)      -> port 3001
+
+For n8n, start n8n on port `5678`, import `api/n8n-extension-workflow.json`, and run `python manager.py start --platform n8n` for the remaining services.
