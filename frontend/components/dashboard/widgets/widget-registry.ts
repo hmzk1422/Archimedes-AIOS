@@ -33,6 +33,7 @@ const ResolutionRateWidget = dynamic(() => import('./resolution-rate-widget').th
 const MessageVolumeWidget = dynamic(() => import('./message-volume-widget').then((m) => m.MessageVolumeWidget), { ssr: false })
 const ConversationSourcesWidget = dynamic(() => import('./conversation-sources-widget').then((m) => m.ConversationSourcesWidget), { ssr: false })
 const CustomMetricWidget = dynamic(() => import('./custom-metric-widget').then((m) => m.CustomMetricWidget), { ssr: false })
+const DynamicMetricWidget = dynamic(() => import('./dynamic-metric-widget').then((m) => m.DynamicMetricWidget), { ssr: false })
 
 export {
   TokenConsumptionWidget,
@@ -45,6 +46,7 @@ export {
   MessageVolumeWidget,
   ConversationSourcesWidget,
   CustomMetricWidget,
+  DynamicMetricWidget,
   }
 
 export const WIDGET_DEFINITIONS: Record<string, WidgetDefinition> = {
@@ -121,6 +123,48 @@ export const WIDGET_DEFINITIONS: Record<string, WidgetDefinition> = {
       },
     ],
   },
+  'dynamic-metric': {
+    type: 'dynamic-metric', name: 'Dynamic Metric',
+    description: 'Config-driven widget — KPI, chart, table, tag cloud or score gauge from any metric and tags.',
+    icon: TrendingUp, defaultWidth: 3, defaultHeight: 3,
+    defaultDataSource: { nodeType: 'telemetry_metrics' }, defaultRange: '30d', viewType: 'chart',
+    configSchema: [
+      { key: 'metricName', label: 'Metric Name', type: 'text', placeholder: 'e.g. contacts, resolve_count' },
+      { key: 'metricField', label: 'Value Field', type: 'text', placeholder: 'e.g. value, score' },
+      { key: 'groupBy', label: 'Group By', type: 'text', placeholder: 'tags.channel, tags.keyword or metric_name' },
+      { key: 'filters', label: 'Tag Filters (JSON)', type: 'text', placeholder: '{"risk":"high"}' },
+      {
+        key: 'aggregation', label: 'Aggregation', type: 'select',
+        options: [
+          { value: 'avg', label: 'Average' },
+          { value: 'sum', label: 'Sum' },
+          { value: 'max', label: 'Maximum' },
+          { value: 'min', label: 'Minimum' },
+          { value: 'count', label: 'Count' },
+          { value: 'distinct', label: 'Distinct' },
+        ],
+      },
+      {
+        key: 'viz', label: 'Visualization', type: 'select',
+        options: [
+          { value: 'kpi', label: 'KPI Card' },
+          { value: 'chart', label: 'Chart' },
+          { value: 'table', label: 'Table' },
+          { value: 'tagcloud', label: 'Tag Cloud' },
+          { value: 'score_gauge', label: 'Score Gauge' },
+        ],
+      },
+      {
+        key: 'chartType', label: 'Chart Type', type: 'select',
+        options: [
+          { value: 'bar', label: 'Bar' },
+          { value: 'line', label: 'Line' },
+          { value: 'area', label: 'Area' },
+          { value: 'pie', label: 'Pie' },
+        ],
+      },
+    ],
+  },
 }
 
 export const WIDGET_REGISTRY: Record<string, WidgetRegistryEntry> = Object.fromEntries(
@@ -130,7 +174,8 @@ export const WIDGET_REGISTRY: Record<string, WidgetRegistryEntry> = Object.fromE
       latency: LatencyWidget, 'error-rate': ErrorRateWidget, traces: TracesWidget,
       'platform-usage': PlatformUsageWidget, 'resolution-rate': ResolutionRateWidget,
       'message-volume': MessageVolumeWidget, 'conversation-sources': ConversationSourcesWidget,
-      'custom-metric': CustomMetricWidget as ComponentType<{ widget: DashboardWidget; data: unknown }>,    }
+      'custom-metric': CustomMetricWidget as ComponentType<{ widget: DashboardWidget; data: unknown }>,
+      'dynamic-metric': DynamicMetricWidget as ComponentType<{ widget: DashboardWidget; data: unknown }>,    }
     return [key, { definition: def, component: componentMap[key] }]
   }),
 ) as Record<string, WidgetRegistryEntry>

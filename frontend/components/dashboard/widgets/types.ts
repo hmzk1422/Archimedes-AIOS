@@ -18,7 +18,8 @@ export type WidgetType =
   | 'resolution-rate'
   | 'message-volume'
   | 'conversation-sources'
-  | 'custom-metric'
+    | 'custom-metric'
+  | 'dynamic-metric'
   | 'ai-coder'
 
 /** The data source a widget reads from — mirrors the backend metric nodes. */

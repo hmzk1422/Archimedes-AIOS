@@ -18,6 +18,10 @@ export type NodeTypeId =
   | 'http-response'
   | 'slack'
   | 'telegram_send'
+  | 'delay'
+  | 'router'
+  | 'loop'
+  | 'http_request'
 
 export interface NodeField {
   key: string

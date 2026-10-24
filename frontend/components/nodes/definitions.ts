@@ -209,74 +209,6 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     },
   },
 
-  metrics: {
-    typeId: 'metrics',
-    category: 'processing',
-    name: 'Metrics',
-    description: 'Record custom metrics and evaluations from the flow',
-    color: '#3B82F6',
-    icon: '📊',
-    fields: [
-      {
-        key: 'metric_name',
-        label: 'Metric Name',
-        placeholder: 'conversation_duration_ms',
-        required: true,
-      },
-      {
-        key: 'metric_type',
-        label: 'Metric Type',
-        type: 'select',
-        options: [
-          { label: 'Counter', value: 'counter' },
-          { label: 'Gauge', value: 'gauge' },
-        ],
-      },
-      {
-        key: 'value_template',
-        label: 'Value Expression',
-        placeholder: '{{response.duration_ms}} or 1',
-        required: true,
-      },
-      {
-        key: 'tags',
-        label: 'Tags (JSON)',
-        placeholder: '{"channel": "telegram", "tier": "enterprise"}',
-        type: 'json',
-      },
-      {
-        key: 'evaluation_name',
-        label: 'Evaluation Name (optional)',
-        placeholder: 'faithfulness',
-      },
-      {
-        key: 'min_score',
-        label: 'Min Score',
-        placeholder: '0',
-        type: 'number',
-      },
-      {
-        key: 'max_score',
-        label: 'Max Score',
-        placeholder: '10',
-        type: 'number',
-      },
-    ],
-    ports: [
-      { id: 'in', label: 'In', type: 'input' },
-      { id: 'out', label: 'Out', type: 'output' },
-    ],
-    defaultConfig: {
-      metric_name: '',
-      metric_type: 'counter',
-      value_template: '1',
-      tags: '{}',
-      evaluation_name: '',
-      min_score: '0',
-      max_score: '10',
-    },
-  },
-
   transform: {
     typeId: 'transform',
     category: 'processing',
@@ -323,7 +255,7 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     defaultConfig: { condition: '' },
   },
 
-  code: {
+    code: {
     typeId: 'code',
     category: 'processing',
     name: 'Code',
@@ -343,6 +275,112 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
       { id: 'out', label: 'Out', type: 'output' },
     ],
     defaultConfig: { code: '' },
+  },
+
+  delay: {
+    typeId: 'delay',
+    category: 'processing',
+    name: 'Delay',
+    description: 'Wait a number of seconds before continuing the flow',
+    color: '#6B7280',
+    icon: '⏱️',
+    fields: [
+      {
+        key: 'delay_seconds',
+        label: 'Delay (seconds)',
+        placeholder: '5',
+        type: 'number',
+        required: true,
+      },
+      {
+        key: 'delay_mode',
+        label: 'Delay Mode',
+        type: 'select',
+        options: [
+          { label: 'Fixed seconds', value: 'fixed_seconds' },
+          { label: 'Until time (ISO)', value: 'until_time' },
+        ],
+      },
+      {
+        key: 'until_time',
+        label: 'Until (ISO timestamp)',
+        placeholder: '2026-08-15T10:00:00Z',
+        type: 'text',
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Out', type: 'output' },
+    ],
+    defaultConfig: { delay_seconds: '5', delay_mode: 'fixed_seconds', until_time: '' },
+  },
+
+  router: {
+    typeId: 'router',
+    category: 'processing',
+    name: 'Router',
+    description: 'Route to different output branches based on a value',
+    color: '#F97316',
+    icon: '🔀',
+    fields: [
+      {
+        key: 'field',
+        label: 'Value to route on',
+        placeholder: '{{response.category}}',
+        required: true,
+      },
+      {
+        key: 'routes',
+        label: 'Routes (JSON array)',
+        placeholder: '[{"value": "sales", "label": "Sales"}, {"value": "support", "label": "Support"}]',
+        type: 'json',
+      },
+      {
+        key: 'default_route',
+        label: 'Default route label',
+        placeholder: 'default',
+        required: true,
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Out', type: 'output' },
+    ],
+    defaultConfig: { field: '', routes: '[]', default_route: 'default' },
+  },
+
+  loop: {
+    typeId: 'loop',
+    category: 'processing',
+    name: 'Loop',
+    description: 'Iterate over a list of items',
+    color: '#EC4899',
+    icon: '🔁',
+    fields: [
+      {
+        key: 'collection',
+        label: 'Collection expression',
+        placeholder: '{{items}}',
+        required: true,
+      },
+      {
+        key: 'item_var',
+        label: 'Item variable name',
+        placeholder: 'item',
+        required: true,
+      },
+      {
+        key: 'max_iterations',
+        label: 'Max iterations',
+        placeholder: '100',
+        type: 'number',
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Out', type: 'output' },
+    ],
+    defaultConfig: { collection: '', item_var: 'item', max_iterations: '100' },
   },
 
   // Output Nodes - Actions and Responses
@@ -417,6 +455,137 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     ],
     ports: [{ id: 'in', label: 'In', type: 'input' }],
     defaultConfig: { status_code: '200' },
+  },
+
+  http_request: {
+    typeId: 'http_request',
+    category: 'output',
+    name: 'HTTP Request',
+    description: 'Make an outbound HTTP request',
+    color: '#6366F1',
+    icon: '📡',
+    fields: [
+      {
+        key: 'method',
+        label: 'Method',
+        type: 'select',
+        options: [
+          { label: 'GET', value: 'GET' },
+          { label: 'POST', value: 'POST' },
+          { label: 'PUT', value: 'PUT' },
+          { label: 'PATCH', value: 'PATCH' },
+          { label: 'DELETE', value: 'DELETE' },
+        ],
+      },
+      {
+        key: 'url',
+        label: 'URL',
+        placeholder: 'https://api.example.com/endpoint',
+        required: true,
+      },
+      {
+        key: 'headers',
+        label: 'Headers (JSON)',
+        placeholder: '{"Authorization": "Bearer ..."}',
+        type: 'json',
+      },
+      {
+        key: 'body',
+        label: 'Body (JSON)',
+        placeholder: '{"key": "{{value}}"}',
+        type: 'json',
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Out', type: 'output' },
+    ],
+    defaultConfig: { method: 'GET', url: '', headers: '{}', body: '{}' },
+  },
+
+  metrics: {
+    typeId: 'metrics',
+    category: 'output',
+    name: 'Metric',
+    description:
+      'Emit a dynamic metric (counter / gauge / distribution / boolean) to the telemetry store. One metrics node drives every dashboard domain — only `tags` differ.',
+    color: '#38BDF8',
+    icon: '📊',
+    fields: [
+      {
+        key: 'metric_name',
+        label: 'Metric Name',
+        placeholder: 'e.g. contacts, probability, keyword',
+        type: 'text',
+        required: true,
+      },
+      {
+        key: 'metric_type',
+        label: 'Metric Type',
+        type: 'select',
+        options: [
+          { value: 'counter', label: 'Counter' },
+          { value: 'gauge', label: 'Gauge' },
+          { value: 'distribution', label: 'Distribution' },
+          { value: 'boolean', label: 'Boolean' },
+        ],
+      },
+      {
+        key: 'value_template',
+        label: 'Value Template',
+        placeholder: '{{response.duration_ms}}',
+        type: 'text',
+      },
+      {
+        key: 'value',
+        label: 'Static Value',
+        placeholder: '123',
+        type: 'number',
+      },
+      {
+        key: 'unit',
+        label: 'Unit',
+        placeholder: 'ms',
+        type: 'text',
+      },
+      {
+        key: 'tags',
+        label: 'Tags (JSON)',
+        placeholder: '{"channel":"whatsapp","risk":"high","intent":"bullying"}',
+        type: 'json',
+      },
+      {
+        key: 'evaluation_name',
+        label: 'Evaluation Name',
+        placeholder: 'e.g. CSAT, faithfulness',
+        type: 'text',
+      },
+      {
+        key: 'score_min',
+        label: 'Score Min',
+        type: 'number',
+      },
+      {
+        key: 'score_max',
+        label: 'Score Max',
+        type: 'number',
+      },
+    ],
+    ports: [
+      { id: 'in', label: 'In', type: 'input' },
+      { id: 'out', label: 'Value', type: 'output' },
+    ],
+    defaultConfig: {
+      metric_name: '',
+      metric_type: 'counter',
+      value_template: '',
+      value: '',
+      unit: '',
+      tags: '{}',
+      evaluation_name: '',
+      score_min: '',
+      score_max: '',
+    },
   },
 
   slack: {

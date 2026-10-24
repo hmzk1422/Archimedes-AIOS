@@ -329,3 +329,67 @@ export async function updateTenantAppearanceAction(appearance: Appearance) {
   if (error) throw new Error(error.message)
   return appearance
 }
+
+/**
+ * The shape of `profiles.extension` — the legacy platform config + the embedded
+ * drag-and-drop flow the canvas round-trips through (`connection-extension.flow`).
+ */
+export type WorkflowExtension = Record<string, unknown>
+
+/**
+ * Read the workspace's saved agentic workflow (extension config).
+ *
+ * The workflow lives on the workspace OWNER's profile row (`id === workspace_id`),
+ * so the admin and every developer/viewer see the SAME flow. This is also the
+ * row the AI runtime (api/workflow_engine.py / api/extension.py) loads and
+ * executes — the canvas must read that row or a developer sees a different
+ * workflow than the admin (and their edits silently never run).
+ */
+export async function getWorkflowExtensionAction(): Promise<{
+  extension: WorkflowExtension | null
+  canEdit: boolean
+}> {
+  const authUser = await getAuthUser()
+  if (!authUser) return { extension: null, canEdit: false }
+
+  const canEdit = hasPermission(authUser.role, 'workflow:edit')
+
+  const supabase = createAdminClient()
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('extension')
+    .eq('id', authUser.workspaceId)
+    .maybeSingle()
+
+  if (error) throw new Error(error.message)
+
+  return {
+    extension: (data?.extension as WorkflowExtension | null) ?? null,
+    canEdit,
+  }
+}
+
+/**
+ * Persist the workspace's agentic workflow (extension config) on the workspace
+ * OWNER's profile row so the whole team shares one flow — the same row the AI
+ * runtime executes from. Admin + developer may edit (`workflow:edit`); viewers
+ * are read-only. The security boundary is enforced server-side with the service
+ * role, not just hidden in the UI.
+ */
+export async function saveWorkflowExtensionAction(extension: WorkflowExtension) {
+  const authUser = await getAuthUser()
+  if (!authUser) throw new Error('Not authenticated')
+
+  if (!hasPermission(authUser.role, 'workflow:edit')) {
+    throw new Error('You do not have permission to edit the workflow.')
+  }
+
+  const supabase = createAdminClient()
+  const { error } = await supabase
+    .from('profiles')
+    .update({ extension })
+    .eq('id', authUser.workspaceId)
+
+  if (error) throw new Error(error.message)
+  return extension
+}

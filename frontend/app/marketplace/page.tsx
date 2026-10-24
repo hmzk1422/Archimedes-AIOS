@@ -24,6 +24,7 @@ import { PageBackground } from '@/components/page-background'
 import WorkflowEditor from '@/components/nodes/WorkflowEditor'
 import type { FlowConfig, NodeConfig, EdgeConfig, NodeTypeId } from '@/components/nodes/types'
 import { cn } from '@/lib/utils'
+import { saveWorkflowExtensionAction } from '@/app/actions'
 
 // ─── Marketplace Templates ────────────────────────────────────────────
 
@@ -372,23 +373,23 @@ export default function MarketplacePage() {
     if (!userId) return
     setSaving(true)
     setStatus({ kind: 'info', message: 'Deploying your custom AI agent...' })
-    const supabase = createClient()
 
     try {
-      // Save the flow config to the user's profile
-      const { error } = await supabase
-        .from('profiles')
-        .update({
-          extension: {
-            'connection-extension': {
-              enabled: config.masterEnabled,
-              platforms: extractPlatforms(config),
-            },
+      // Deploy to the workspace OWNER's profile row (the shared flow the AI
+      // runtime executes) via the service-role server action. Deploying a
+      // template must replace the flow the whole team sees — not a per-user
+      // copy that the runtime ignores.
+      await saveWorkflowExtensionAction({
+        'connection-extension': {
+          enabled: config.masterEnabled,
+          platforms: extractPlatforms(config),
+          flow: {
+            masterEnabled: config.masterEnabled,
+            nodes: config.nodes,
+            edges: config.edges,
           },
-        })
-        .eq('id', userId)
-
-      if (error) throw error
+        },
+      })
 
       setFlowConfig(config)
       setStatus({ kind: 'success', message: `✅ "${selectedTemplate?.name ?? 'Custom AI'}" deployed successfully!` })

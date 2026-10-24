@@ -79,7 +79,7 @@ def start_activepieces():
     return p_ap
 
 
-def run_app(platform="n8n"):
+def run_app(platform="activepieces"):
     print("🚀 --- RUNNING SERVICES ---")
     processes = []
     api_dir, python_path, _ = get_venv_paths()
@@ -164,13 +164,22 @@ def run_app(platform="n8n"):
         sys.exit(0)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Shortcut to install or run the project.")
-    parser.add_argument("action", choices=["install", "run"], help="Type 'install' to download dependencies or 'run' to start servers.")
-    parser.add_argument("--platform", choices=["n8n", "activepieces"], default="n8n", help="Choose platform for ngrok tunnel: n8n (port 5678) or activepieces (port 8001)")
+    parser = argparse.ArgumentParser(description="Install or start Archimedees-aios.")
+    parser.add_argument(
+        "action",
+        choices=["install", "start", "run"],
+        help="Use 'install' to prepare dependencies; 'start' (or 'run') starts the platform.",
+    )
+    parser.add_argument(
+        "--platform",
+        choices=["n8n", "activepieces"],
+        default="activepieces",
+        help="Workflow engine to start (default: activepieces).",
+    )
     
     args = parser.parse_args()
     
     if args.action == "install":
         install_packages()
-    elif args.action == "run":
+    elif args.action in ("start", "run"):
         run_app(args.platform)
